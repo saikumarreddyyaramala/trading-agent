@@ -2,16 +2,24 @@
 
 from trading_agent.domain.models import (
     AccountSnapshot,
+    Asset,
+    Bar,
     ChatMessage,
     LLMRequest,
     LLMResponse,
     LLMUsage,
     MarketClock,
+    MarketDataSnapshot,
+    NewsArticle,
+    Quote,
+    SymbolData,
 )
-from trading_agent.domain.ports import BrokerPort, LLMProviderPort
+from trading_agent.domain.ports import BrokerPort, LLMProviderPort, MarketDataPort, NewsPort
 
 __all__ = [
     "AccountSnapshot",
+    "Asset",
+    "Bar",
     "BrokerPort",
     "ChatMessage",
     "LLMProviderPort",
@@ -19,4 +27,10 @@ __all__ = [
     "LLMResponse",
     "LLMUsage",
     "MarketClock",
+    "MarketDataPort",
+    "MarketDataSnapshot",
+    "NewsArticle",
+    "NewsPort",
+    "Quote",
+    "SymbolData",
 ]

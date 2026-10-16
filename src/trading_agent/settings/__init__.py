@@ -10,6 +10,7 @@ from trading_agent.settings.models import (
     BrokerConfig,
     Environment,
     LLMConfig,
+    MarketDataConfig,
     RiskConfig,
     ScheduleConfig,
 )
@@ -21,6 +22,7 @@ __all__ = [
     "ConfigError",
     "Environment",
     "LLMConfig",
+    "MarketDataConfig",
     "RiskConfig",
     "ScheduleConfig",
     "Secrets",

@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 import typer
 
 from trading_agent import __version__
 from trading_agent.bootstrap import Container
-from trading_agent.health import CheckStatus, overall_ok, run_healthchecks
+from trading_agent.data.errors import MarketDataError
+from trading_agent.domain.models import SymbolData
+from trading_agent.health import CheckStatus, format_age, overall_ok, run_healthchecks
 from trading_agent.observability.logging import configure_logging
 from trading_agent.settings.loader import ConfigError, load_config
 from trading_agent.settings.secrets import Secrets
@@ -58,6 +61,8 @@ def healthcheck(
         container.config,
         container.secrets,
         broker_factory=container.build_broker,
+        market_data_factory=container.build_market_data,
+        news_factory=container.build_news,
         llm_factory=None if skip_llm else container.build_llm_gateway,
     )
     ok = overall_ok(results)
@@ -78,6 +83,100 @@ def healthcheck(
         typer.secho(f"\n{verdict}", fg=typer.colors.GREEN if ok else typer.colors.RED, bold=True)
 
     raise typer.Exit(code=0 if ok else 1)
+
+
+def _symbol_payload(data: SymbolData, now: datetime) -> dict[str, Any]:
+    quote = data.quote
+    return {
+        "symbol": data.symbol,
+        "name": data.asset.name,
+        "exchange": data.asset.exchange,
+        "tradable": data.asset.tradable,
+        "quote": None
+        if quote is None
+        else {
+            "bid": str(quote.bid_price),
+            "ask": str(quote.ask_price),
+            "spread_pct": f"{quote.spread_pct:.3f}",
+            "timestamp": quote.timestamp.isoformat(),
+            "age_seconds": round(quote.age_seconds(now)),
+        },
+        "last_close": str(data.last_close),
+        "change_pct": f"{data.change_pct:.2f}",
+        "avg_daily_volume": data.avg_daily_volume,
+        "bars": len(data.daily_bars),
+        "news": [
+            {
+                "created_at": a.created_at.isoformat(),
+                "headline": a.headline,
+                "source": a.source,
+                "url": a.url,
+            }
+            for a in data.news
+        ],
+    }
+
+
+def _print_symbol(data: SymbolData, now: datetime) -> None:
+    asset = data.asset
+    state = "tradable" if asset.tradable else "NOT tradable"
+    typer.secho(f"{data.symbol}", bold=True, nl=False)
+    typer.echo(f"  {asset.name or ''} ({asset.exchange}, {state})")
+    quote = data.quote
+    if quote is None:
+        typer.echo("  Quote   none usable")
+    else:
+        typer.echo(
+            f"  Quote   bid ${quote.bid_price:,.2f} / ask ${quote.ask_price:,.2f} "
+            f"(spread {quote.spread_pct:.2f}%), {format_age(quote.age_seconds(now))} old"
+        )
+    typer.echo(
+        f"  Daily   last close ${data.last_close:,.2f}, {len(data.daily_bars)}d change "
+        f"{data.change_pct:+.2f}%, avg volume {data.avg_daily_volume:,}"
+    )
+    typer.echo(f"  News    {len(data.news)} recent article(s)")
+    for article in data.news:
+        typer.echo(f"          {article.created_at:%Y-%m-%d %H:%M}  {article.headline}")
+
+
+@app.command("market-data")
+def market_data(
+    symbols: Annotated[list[str], typer.Argument(help="Ticker symbols, e.g. AAPL MSFT.")],
+    env: EnvOption = None,
+    config_dir: ConfigDirOption = None,
+    fresh: Annotated[
+        bool, typer.Option("--fresh", help="Reject symbols whose quote is stale or unusable.")
+    ] = False,
+    as_json: Annotated[bool, typer.Option("--json", help="Machine-readable output.")] = False,
+) -> None:
+    """Collect quotes, daily bars, and news for symbols (read-only)."""
+    container = _container(env, config_dir)
+    try:
+        snapshot = container.build_collector().collect(symbols, require_fresh_quotes=fresh)
+    except (ConfigError, ValueError) as exc:
+        typer.secho(f"Error: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=2) from exc
+    except MarketDataError as exc:
+        typer.secho(f"Market data unavailable: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1) from exc
+
+    now = snapshot.collected_at
+    if as_json:
+        payload = {
+            "collected_at": now.isoformat(),
+            "symbols": [_symbol_payload(d, now) for d in snapshot.symbols.values()],
+            "rejected": snapshot.rejected,
+        }
+        typer.echo(json.dumps(payload, indent=2))
+    else:
+        for data in snapshot.symbols.values():
+            _print_symbol(data, now)
+            typer.echo("")
+        for symbol, reason in snapshot.rejected.items():
+            typer.secho("REJECTED", fg=typer.colors.RED, nl=False)
+            typer.echo(f"  {symbol}: {reason}")
+
+    raise typer.Exit(code=1 if snapshot.rejected else 0)
 
 
 @app.command("show-config")

@@ -89,6 +89,19 @@ class BrokerConfig(_Strict):
     paper: bool = True
 
 
+class MarketDataConfig(_Strict):
+    provider: Literal["alpaca"] = "alpaca"
+    # Real-time quotes: "iex" is free; "sip" needs a paid subscription.
+    quote_feed: Literal["iex", "sip", "delayed_sip"] = "iex"
+    # Daily bars: "sip" (all US exchanges) is free when older than 15 minutes; "iex" volume
+    # covers only one exchange and would understate liquidity.
+    bars_feed: Literal["iex", "sip"] = "sip"
+    daily_bars: int = Field(default=30, ge=2, le=250)
+    news_lookback_hours: int = Field(default=24, gt=0, le=168)
+    max_news_articles: int = Field(default=50, gt=0, le=200)
+    news_per_symbol: int = Field(default=5, gt=0, le=50)
+
+
 class AppConfig(_Strict):
     environment: Environment = Environment.PAPER
     kill_switch: bool = False
@@ -96,6 +109,7 @@ class AppConfig(_Strict):
     risk: RiskConfig = RiskConfig()
     llm: LLMConfig = LLMConfig()
     broker: BrokerConfig = BrokerConfig()
+    market_data: MarketDataConfig = MarketDataConfig()
 
     @model_validator(mode="after")
     def _environment_matches_broker(self) -> AppConfig:

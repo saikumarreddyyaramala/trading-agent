@@ -42,3 +42,12 @@ llm:
 broker:
   provider: alpaca
   paper: true
+
+market_data:
+  provider: alpaca
+  quote_feed: iex             # real-time quotes: iex (free) | sip (paid) | delayed_sip
+  bars_feed: sip              # daily bars: sip covers all exchanges (free if >15 min old)
+  daily_bars: 30              # trading days of history per symbol
+  news_lookback_hours: 24
+  max_news_articles: 50       # per collection run
+  news_per_symbol: 5

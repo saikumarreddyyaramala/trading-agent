@@ -12,8 +12,8 @@ risk engine, executes on a broker, and reports the result against the S&P 500.
 | Phase | Scope | Status |
 | --- | --- | --- |
 | 0 | Foundations: config, secrets, logging, LLM gateway, broker connection, health check, CI | Done |
-| 1 | Market data and news | Next |
-| 2 | MCP server (read-only tools) | Planned |
+| 1 | Market data and news: quotes, daily bars, assets, news, freshness rules | Done |
+| 2 | MCP server (read-only tools) | Next |
 | 3 | Analyst agent | Planned |
 | 4 | Risk engine | Planned |
 | 5 | Order execution (paper) | Planned |
@@ -34,14 +34,18 @@ risk engine, executes on a broker, and reports the result against the S&P 500.
             │
  orchestration ──► risk engine ──► BrokerPort ◄── execution/alpaca_broker.py
             │
+ MarketDataCollector ──► MarketDataPort ◄── data/alpaca_market_data.py
+                     └─► NewsPort       ◄── data/alpaca_news.py
+            │
  bootstrap.py (composition root) wires adapters to ports from config + secrets
 ```
 
-Key rules (see [ADR 0001](docs/adr/0001-architecture.md)):
+Key rules (see [ADR 0001](docs/adr/0001-architecture.md) and [ADR 0002](docs/adr/0002-market-data.md)):
 - The AI has read-only tools; it can never place an order directly.
 - Every model call goes through the LLM gateway (pinned model, fallback, token caps, logs).
 - Config is versioned YAML; secrets come only from the environment and are redacted.
 - Any failed or erroring check means "no trade".
+- Market data must pass quality and freshness rules; a symbol with bad data is rejected.
 
 ## Quick start
 
@@ -68,6 +72,8 @@ PASS  Kill switch      off
 PASS  Secrets          all required keys present (values hidden)
 PASS  Broker account   ACTIVE ****1234, equity $100,000.00, cash $100,000.00
 PASS  Market clock     market closed; next open 2026-10-16 09:30 EDT
+PASS  Market data      SPY bid $772.07 / ask $772.16, quote 7h 24m old, last close $771.79 (quotes=iex, bars=sip)
+PASS  News             latest article 11m ago (benzinga)
 PASS  LLM              gpt-6.1-sol replied in 1200 ms
 
 Ready
@@ -81,6 +87,7 @@ Ready
 | `make test-integration` | Tests against real Alpaca paper and the LLM (uses `.env`) |
 | `make healthcheck` | Pre-flight check with your `.env` |
 | `make docker-healthcheck` | Build the container and run the health check inside it |
+| `uv run trading-agent market-data AAPL MSFT` | Quotes, daily bars, and news for symbols (`--fresh` enforces quote freshness, `--json` for machines) |
 | `uv run trading-agent show-config` | Print the effective config (never secrets) |
 
 ## Project layout
@@ -93,7 +100,8 @@ src/trading_agent/
   observability/         structured logging with secret redaction
   llm/                   LLM gateway + OpenAI and Anthropic adapters
   execution/             Alpaca adapter (orders in Phase 5)
-  data/ mcp_server/ agents/ risk/ storage/ orchestration/ reporting/   (upcoming phases)
+  data/                  market data + news adapters, quality/freshness rules, collector
+  mcp_server/ agents/ risk/ storage/ orchestration/ reporting/   (upcoming phases)
   bootstrap.py           composition root
   health.py              pre-flight checks
   cli.py                 `trading-agent` command

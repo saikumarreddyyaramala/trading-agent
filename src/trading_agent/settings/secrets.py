@@ -14,6 +14,9 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 BROKER_SECRET_FIELDS: dict[str, tuple[str, ...]] = {
     "alpaca": ("alpaca_api_key", "alpaca_secret_key"),
 }
+MARKET_DATA_SECRET_FIELDS: dict[str, tuple[str, ...]] = {
+    "alpaca": ("alpaca_api_key", "alpaca_secret_key"),
+}
 LLM_SECRET_FIELDS: dict[str, tuple[str, ...]] = {
     "openai": ("openai_api_key",),
     "anthropic": ("anthropic_api_key",),

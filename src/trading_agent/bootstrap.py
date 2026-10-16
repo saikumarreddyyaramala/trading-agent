@@ -8,14 +8,22 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from trading_agent.domain.ports import BrokerPort, LLMProviderPort
+from trading_agent.data.alpaca_market_data import AlpacaMarketData
+from trading_agent.data.alpaca_news import AlpacaNews
+from trading_agent.data.collector import MarketDataCollector
+from trading_agent.domain.ports import BrokerPort, LLMProviderPort, MarketDataPort, NewsPort
 from trading_agent.execution.alpaca_broker import AlpacaBroker
 from trading_agent.llm.anthropic_provider import AnthropicProvider
 from trading_agent.llm.gateway import LLMGateway
 from trading_agent.llm.openai_provider import OpenAIProvider
 from trading_agent.settings.loader import ConfigError
 from trading_agent.settings.models import AppConfig
-from trading_agent.settings.secrets import BROKER_SECRET_FIELDS, LLM_SECRET_FIELDS, Secrets
+from trading_agent.settings.secrets import (
+    BROKER_SECRET_FIELDS,
+    LLM_SECRET_FIELDS,
+    MARKET_DATA_SECRET_FIELDS,
+    Secrets,
+)
 
 
 @dataclass(frozen=True)
@@ -23,21 +31,47 @@ class Container:
     config: AppConfig
     secrets: Secrets
 
-    def build_broker(self) -> BrokerPort:
-        missing = self.secrets.missing(*BROKER_SECRET_FIELDS[self.config.broker.provider])
+    def _require(self, what: str, fields: tuple[str, ...]) -> None:
+        missing = self.secrets.missing(*fields)
         if missing:
-            raise ConfigError(f"missing broker credentials: {', '.join(missing)}")
+            raise ConfigError(f"missing {what} credentials: {', '.join(missing)}")
+
+    def build_broker(self) -> BrokerPort:
+        self._require("broker", BROKER_SECRET_FIELDS[self.config.broker.provider])
         return AlpacaBroker(
             self.secrets.require("alpaca_api_key"),
             self.secrets.require("alpaca_secret_key"),
             paper=self.config.broker.paper,
         )
 
+    def build_market_data(self) -> MarketDataPort:
+        market_data = self.config.market_data
+        self._require("market data", MARKET_DATA_SECRET_FIELDS[market_data.provider])
+        return AlpacaMarketData(
+            self.secrets.require("alpaca_api_key"),
+            self.secrets.require("alpaca_secret_key"),
+            paper=self.config.broker.paper,
+            quote_feed=market_data.quote_feed,
+            bars_feed=market_data.bars_feed,
+        )
+
+    def build_news(self) -> NewsPort:
+        self._require("news", MARKET_DATA_SECRET_FIELDS[self.config.market_data.provider])
+        return AlpacaNews(
+            self.secrets.require("alpaca_api_key"), self.secrets.require("alpaca_secret_key")
+        )
+
+    def build_collector(self) -> MarketDataCollector:
+        return MarketDataCollector(
+            self.build_market_data(),
+            self.build_news(),
+            self.config.market_data,
+            max_data_age_seconds=self.config.risk.max_data_age_seconds,
+        )
+
     def build_llm_gateway(self) -> LLMGateway:
         llm = self.config.llm
-        missing = self.secrets.missing(*LLM_SECRET_FIELDS[llm.provider])
-        if missing:
-            raise ConfigError(f"missing LLM credentials: {', '.join(missing)}")
+        self._require("LLM", LLM_SECRET_FIELDS[llm.provider])
         provider: LLMProviderPort
         if llm.provider == "openai":
             provider = OpenAIProvider(

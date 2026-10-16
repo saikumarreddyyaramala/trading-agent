@@ -14,8 +14,8 @@ build it, not as a script.
 
 ### 1. Ports and adapters (hexagonal architecture)
 Business logic depends only on interfaces in `domain/ports.py` (`BrokerPort`,
-`LLMProviderPort`, and later market data and storage ports). Vendor SDKs live only in
-adapters (`execution/`, `llm/`, `data/`). `bootstrap.py` is the single composition root.
+`LLMProviderPort`, `MarketDataPort`, `NewsPort`, and later a storage port). Vendor SDKs live
+only in adapters (`execution/`, `llm/`, `data/`). `bootstrap.py` is the single composition root.
 
 *Why:* vendors can be swapped through config, and every component is testable with fakes.
 
@@ -57,6 +57,5 @@ real services are opt-in and never run in CI.
   interviewers ask about.
 
 ## Planned decisions
-- 0002: Market data provider and data freshness rules (Phase 1)
 - 0003: MCP tool design and permissions (Phase 2)
 - 0004: Workflow engine for the daily cycle (Phase 7)

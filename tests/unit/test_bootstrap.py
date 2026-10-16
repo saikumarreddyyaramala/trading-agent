@@ -6,6 +6,7 @@ import pytest
 
 from tests.conftest import make_secrets
 from trading_agent.bootstrap import Container
+from trading_agent.data import AlpacaMarketData, AlpacaNews, MarketDataCollector
 from trading_agent.execution import AlpacaBroker
 from trading_agent.llm import LLMGateway
 from trading_agent.settings import ConfigError, load_config
@@ -25,6 +26,22 @@ def test_builds_paper_broker(config_dir: Path) -> None:
     broker = container.build_broker()
     assert isinstance(broker, AlpacaBroker)
     assert broker.is_paper
+
+
+def test_builds_market_data_news_and_collector(config_dir: Path) -> None:
+    container = Container(config=load_config("paper", config_dir), secrets=make_secrets())
+    assert isinstance(container.build_market_data(), AlpacaMarketData)
+    assert isinstance(container.build_news(), AlpacaNews)
+    assert isinstance(container.build_collector(), MarketDataCollector)
+
+
+@pytest.mark.parametrize("builder", ["build_market_data", "build_news", "build_collector"])
+def test_market_data_needs_alpaca_keys(config_dir: Path, builder: str) -> None:
+    container = Container(
+        config=load_config("paper", config_dir), secrets=make_secrets(alpaca_api_key=None)
+    )
+    with pytest.raises(ConfigError, match="ALPACA_API_KEY"):
+        getattr(container, builder)()
 
 
 def test_default_llm_is_openai(config_dir: Path) -> None:
@@ -47,7 +64,7 @@ def test_missing_broker_keys_raise(config_dir: Path) -> None:
     container = Container(
         config=load_config("paper", config_dir), secrets=make_secrets(alpaca_secret_key=None)
     )
-    with pytest.raises(ConfigError, match="ALPACA_SECRET_KEY"):
+    with pytest.raises(ConfigError, match="missing broker credentials: ALPACA_SECRET_KEY"):
         container.build_broker()
 
 

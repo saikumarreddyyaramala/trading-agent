@@ -99,6 +99,29 @@ def test_deep_merge_overrides_nested_values_only() -> None:
     assert base["risk"] == {"a": 1, "b": 2}  # inputs are not mutated
 
 
+def test_repo_config_market_data_defaults(config_dir: Path) -> None:
+    market_data = load_config("paper", config_dir).market_data
+    assert market_data.provider == "alpaca"
+    assert market_data.quote_feed == "iex"
+    assert market_data.bars_feed == "sip"
+    assert market_data.daily_bars == 30
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        {"quote_feed": "bloomberg"},
+        {"bars_feed": "delayed_sip"},
+        {"daily_bars": 1},
+        {"news_lookback_hours": 0},
+        {"max_news_articles": 500},
+    ],
+)
+def test_invalid_market_data_settings_are_rejected(override: dict[str, object]) -> None:
+    with pytest.raises(ValueError, match="market_data"):
+        AppConfig.model_validate({"market_data": override})
+
+
 def test_live_trading_requires_explicit_confirmation(config_dir: Path) -> None:
     live = load_config("live", config_dir)
     with pytest.raises(ConfigError, match="LIVE_TRADING_CONFIRMED"):
