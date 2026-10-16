@@ -72,9 +72,13 @@ class RiskConfig(_Strict):
 
 
 class LLMConfig(_Strict):
-    provider: Literal["anthropic"] = "anthropic"
-    model: str = "claude-sonnet-5-5"
+    provider: Literal["openai", "anthropic"] = "openai"
+    model: str = "gpt-6.1-sol"
     fallback_model: str | None = None
+    # OpenAI reasoning models only; ignored by other providers.
+    reasoning_effort: Literal["none", "minimal", "low", "medium", "high", "xhigh", "max"] | None = (
+        None
+    )
     max_tokens: int = Field(default=4096, gt=0)
     timeout_seconds: float = Field(default=60, gt=0)
     max_retries: int = Field(default=2, ge=0, le=10)

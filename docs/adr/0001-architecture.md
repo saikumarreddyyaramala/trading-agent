@@ -27,6 +27,10 @@ code-based risk engine approves. Any error in a check means "no trade" (fail saf
 All model calls go through `LLMGateway`: pinned primary model, fallback model, token caps,
 usage accounting, and structured logs. Agents never import a vendor SDK.
 
+The vendor is chosen in config (`llm.provider`). OpenAI (`gpt-6.1-sol`, fallback
+`gpt-6-luna`, via the Responses API with `store=False`) is the default; an Anthropic
+adapter is kept so the vendor can be switched without code changes.
+
 ### 4. Configuration vs secrets
 - Configuration: versioned YAML (`config/base.yaml` + `config/<env>.yaml`), strictly
   validated, immutable at runtime. Unknown keys fail at startup.

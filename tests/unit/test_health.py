@@ -54,7 +54,7 @@ def test_missing_secrets_fail_and_skip_dependent_checks(paper: AppConfig) -> Non
 def test_skip_llm_does_not_require_llm_key(paper: AppConfig) -> None:
     results = run_healthchecks(
         paper,
-        make_secrets(anthropic_api_key=None),
+        make_secrets(openai_api_key=None, anthropic_api_key=None),
         broker_factory=FakeBroker,
         llm_factory=None,
     )

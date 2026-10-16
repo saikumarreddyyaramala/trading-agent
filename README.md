@@ -29,7 +29,8 @@ risk engine, executes on a broker, and reports the result against the S&P 500.
 ```
             ┌────────────── domain/ports.py (interfaces) ──────────────┐
             │                                                          │
- agents ──► LLMGateway ──► LLMProviderPort ◄── llm/anthropic_provider.py
+ agents ──► LLMGateway ──► LLMProviderPort ◄── llm/openai_provider.py (default)
+                                             ◄── llm/anthropic_provider.py
             │
  orchestration ──► risk engine ──► BrokerPort ◄── execution/alpaca_broker.py
             │
@@ -55,18 +56,19 @@ make healthcheck             # verifies config, keys, Alpaca paper account, and 
 
 You need:
 1. An [Alpaca](https://alpaca.markets) account. Use the **paper trading** API key and secret.
-2. An [Anthropic API](https://console.anthropic.com) key.
+2. An [OpenAI API](https://platform.openai.com) key (the default LLM). To use Claude instead,
+   set `llm.provider: anthropic` in `config/base.yaml` and provide `ANTHROPIC_API_KEY`.
 
 Expected output when everything is set up:
 
 ```
-PASS  Configuration    env=paper, broker=alpaca (paper), model=claude-sonnet-5-5
+PASS  Configuration    env=paper, broker=alpaca (paper), model=gpt-6.1-sol
 PASS  Trading mode     paper trading (simulated money)
 PASS  Kill switch      off
 PASS  Secrets          all required keys present (values hidden)
 PASS  Broker account   ACTIVE ****1234, equity $100,000.00, cash $100,000.00
 PASS  Market clock     market closed; next open 2026-10-16 09:30 EDT
-PASS  LLM              claude-sonnet-5-5 replied in 850 ms
+PASS  LLM              gpt-6.1-sol replied in 1200 ms
 
 Ready
 ```
@@ -89,7 +91,7 @@ src/trading_agent/
   domain/                core types and ports (no vendor SDKs)
   settings/              typed config loader and secrets
   observability/         structured logging with secret redaction
-  llm/                   LLM gateway + Anthropic adapter
+  llm/                   LLM gateway + OpenAI and Anthropic adapters
   execution/             Alpaca adapter (orders in Phase 5)
   data/ mcp_server/ agents/ risk/ storage/ orchestration/ reporting/   (upcoming phases)
   bootstrap.py           composition root
@@ -106,6 +108,9 @@ Change behaviour in `config/*.yaml`, not in code. Examples:
 
 ```yaml
 kill_switch: true            # research and report, but never place orders
+llm:
+  provider: openai           # or anthropic; no code changes needed
+  model: gpt-6.1-sol
 risk:
   max_position_usd: 50
   stop_loss_pct: 5

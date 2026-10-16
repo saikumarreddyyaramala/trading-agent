@@ -113,13 +113,18 @@ def _check_llm(gateway: LLMGateway) -> CheckResult:
     request = LLMRequest(
         system="You are a health check. Follow the instruction exactly.",
         messages=(ChatMessage(role="user", content="Reply with the single word: OK"),),
-        max_tokens=16,
+        # Reasoning models spend hidden tokens before answering, so leave headroom.
+        max_tokens=512,
         tags={"purpose": "healthcheck"},
     )
     try:
         response = gateway.complete(request)
     except Exception as exc:
         return CheckResult("LLM", CheckStatus.FAIL, str(exc))
+    if not response.text.strip():
+        return CheckResult(
+            "LLM", CheckStatus.FAIL, f"{response.model} returned no text ({response.stop_reason})"
+        )
     return CheckResult(
         "LLM",
         CheckStatus.PASS,

@@ -28,10 +28,13 @@ risk:
   max_price_deviation_pct: 2
   max_data_age_seconds: 300
 
+# To switch vendors, change this block only. Example for Claude:
+#   provider: anthropic, model: claude-sonnet-5-5, fallback_model: claude-haiku-5-5
 llm:
-  provider: anthropic
-  model: claude-sonnet-5-5
-  fallback_model: claude-haiku-5-5
+  provider: openai
+  model: gpt-6.1-sol          # primary: agentic and multi-step work
+  fallback_model: gpt-6-luna  # cheaper backup if the primary is unavailable
+  reasoning_effort: medium    # none | minimal | low | medium | high | xhigh | max
   max_tokens: 4096
   timeout_seconds: 60
   max_retries: 2

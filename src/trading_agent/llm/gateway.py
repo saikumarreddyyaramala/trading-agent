@@ -25,6 +25,10 @@ class LLMGateway:
         self._usage = LLMUsage()
 
     @property
+    def provider_name(self) -> str:
+        return self._provider.name
+
+    @property
     def models(self) -> tuple[str, ...]:
         """Primary model first, then the fallback (if configured and different)."""
         fallback = self._config.fallback_model

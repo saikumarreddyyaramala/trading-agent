@@ -8,10 +8,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from trading_agent.domain.ports import BrokerPort
+from trading_agent.domain.ports import BrokerPort, LLMProviderPort
 from trading_agent.execution.alpaca_broker import AlpacaBroker
 from trading_agent.llm.anthropic_provider import AnthropicProvider
 from trading_agent.llm.gateway import LLMGateway
+from trading_agent.llm.openai_provider import OpenAIProvider
 from trading_agent.settings.loader import ConfigError
 from trading_agent.settings.models import AppConfig
 from trading_agent.settings.secrets import BROKER_SECRET_FIELDS, LLM_SECRET_FIELDS, Secrets
@@ -37,9 +38,18 @@ class Container:
         missing = self.secrets.missing(*LLM_SECRET_FIELDS[llm.provider])
         if missing:
             raise ConfigError(f"missing LLM credentials: {', '.join(missing)}")
-        provider = AnthropicProvider(
-            self.secrets.require("anthropic_api_key"),
-            timeout_seconds=llm.timeout_seconds,
-            max_retries=llm.max_retries,
-        )
+        provider: LLMProviderPort
+        if llm.provider == "openai":
+            provider = OpenAIProvider(
+                self.secrets.require("openai_api_key"),
+                timeout_seconds=llm.timeout_seconds,
+                max_retries=llm.max_retries,
+                reasoning_effort=llm.reasoning_effort,
+            )
+        else:
+            provider = AnthropicProvider(
+                self.secrets.require("anthropic_api_key"),
+                timeout_seconds=llm.timeout_seconds,
+                max_retries=llm.max_retries,
+            )
         return LLMGateway(provider, llm)

@@ -14,6 +14,7 @@ import pytest
 from trading_agent.bootstrap import Container
 from trading_agent.domain.models import ChatMessage, LLMRequest
 from trading_agent.settings import Secrets, load_config
+from trading_agent.settings.secrets import LLM_SECRET_FIELDS
 
 pytestmark = pytest.mark.integration
 
@@ -51,12 +52,13 @@ def test_alpaca_paper_account_is_reachable() -> None:
 
 @pytest.mark.skipif(os.environ.get("CI") == "true", reason="never spend LLM tokens in CI")
 def test_llm_round_trip() -> None:
-    gateway = _require("anthropic_api_key").build_llm_gateway()
+    provider = _container().config.llm.provider
+    gateway = _require(*LLM_SECRET_FIELDS[provider]).build_llm_gateway()
     response = gateway.complete(
         LLMRequest(
             system="Reply with exactly one word.",
             messages=(ChatMessage(role="user", content="Say OK"),),
-            max_tokens=16,
+            max_tokens=512,
         )
     )
     assert response.text.strip()

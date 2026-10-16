@@ -40,6 +40,7 @@ def _isolated_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         "CONFIG_DIR",
         "ALPACA_API_KEY",
         "ALPACA_SECRET_KEY",
+        "OPENAI_API_KEY",
         "ANTHROPIC_API_KEY",
         "LIVE_TRADING_CONFIRMED",
     ):
@@ -51,6 +52,7 @@ def make_secrets(**overrides: Any) -> Secrets:
     values: dict[str, Any] = {
         "alpaca_api_key": SecretStr("test-alpaca-key"),
         "alpaca_secret_key": SecretStr("test-alpaca-secret"),
+        "openai_api_key": SecretStr("test-openai-key"),
         "anthropic_api_key": SecretStr("test-anthropic-key"),
         "live_trading_confirmed": False,
     }

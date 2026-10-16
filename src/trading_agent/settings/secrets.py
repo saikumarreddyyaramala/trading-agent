@@ -15,6 +15,7 @@ BROKER_SECRET_FIELDS: dict[str, tuple[str, ...]] = {
     "alpaca": ("alpaca_api_key", "alpaca_secret_key"),
 }
 LLM_SECRET_FIELDS: dict[str, tuple[str, ...]] = {
+    "openai": ("openai_api_key",),
     "anthropic": ("anthropic_api_key",),
 }
 
@@ -33,6 +34,7 @@ class Secrets(BaseSettings):
 
     alpaca_api_key: SecretStr | None = None
     alpaca_secret_key: SecretStr | None = None
+    openai_api_key: SecretStr | None = None
     anthropic_api_key: SecretStr | None = None
     live_trading_confirmed: bool = False
 

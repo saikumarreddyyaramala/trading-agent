@@ -11,14 +11,36 @@ from trading_agent.llm import LLMGateway
 from trading_agent.settings import ConfigError, load_config
 
 
-def test_builds_paper_broker_and_gateway(config_dir: Path) -> None:
+def _use_claude(config_dir: Path) -> None:
+    (config_dir / "paper.yaml").write_text(
+        "environment: paper\n"
+        "broker:\n  paper: true\n"
+        "llm:\n  provider: anthropic\n  model: claude-sonnet-5-5\n  fallback_model: null\n",
+        encoding="utf-8",
+    )
+
+
+def test_builds_paper_broker(config_dir: Path) -> None:
     container = Container(config=load_config("paper", config_dir), secrets=make_secrets())
     broker = container.build_broker()
     assert isinstance(broker, AlpacaBroker)
     assert broker.is_paper
+
+
+def test_default_llm_is_openai(config_dir: Path) -> None:
+    container = Container(config=load_config("paper", config_dir), secrets=make_secrets())
     gateway = container.build_llm_gateway()
     assert isinstance(gateway, LLMGateway)
-    assert gateway.models == ("claude-sonnet-5-5", "claude-haiku-5-5")
+    assert gateway.provider_name == "openai"
+    assert gateway.models == ("gpt-6.1-sol", "gpt-6-luna")
+
+
+def test_llm_vendor_is_switched_by_config_only(config_dir: Path) -> None:
+    _use_claude(config_dir)
+    container = Container(config=load_config("paper", config_dir), secrets=make_secrets())
+    gateway = container.build_llm_gateway()
+    assert gateway.provider_name == "anthropic"
+    assert gateway.models == ("claude-sonnet-5-5",)
 
 
 def test_missing_broker_keys_raise(config_dir: Path) -> None:
@@ -29,9 +51,16 @@ def test_missing_broker_keys_raise(config_dir: Path) -> None:
         container.build_broker()
 
 
-def test_missing_llm_key_raises(config_dir: Path) -> None:
+def test_missing_openai_key_raises(config_dir: Path) -> None:
+    container = Container(
+        config=load_config("paper", config_dir), secrets=make_secrets(openai_api_key=None)
+    )
+    with pytest.raises(ConfigError, match="OPENAI_API_KEY"):
+        container.build_llm_gateway()
+
+
+def test_only_the_selected_vendor_key_is_required(config_dir: Path) -> None:
     container = Container(
         config=load_config("paper", config_dir), secrets=make_secrets(anthropic_api_key=None)
     )
-    with pytest.raises(ConfigError, match="ANTHROPIC_API_KEY"):
-        container.build_llm_gateway()
+    assert container.build_llm_gateway().provider_name == "openai"
