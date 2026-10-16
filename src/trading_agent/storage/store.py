@@ -46,13 +46,6 @@ def order_role(order: BrokerOrder) -> tuple[str, str | None]:
     return ("exit" if order.side == "sell" else "external"), None
 
 
-def _utc(value: datetime | None) -> datetime | None:
-    """SQLite returns naive datetimes; everything is stored in UTC."""
-    if value is None or value.tzinfo is not None:
-        return value
-    return value.replace(tzinfo=UTC)
-
-
 class AuditStore(Protocol):
     def start_run(self, run_id: str, kind: str) -> None: ...
 
@@ -81,6 +74,14 @@ class AuditStore(Protocol):
     def list_runs(self, limit: int) -> list[RunSummary]: ...
 
     def get_run(self, run_id: str) -> dict[str, Any] | None: ...
+
+    def orders_between(self, start: datetime, end: datetime) -> list[dict[str, Any]]:
+        """Orders submitted in [start, end), oldest first."""
+        ...
+
+    def analysis_totals(self, run_id_prefix: str) -> dict[str, int]:
+        """Number of analyses and their token usage, for runs whose id starts with a prefix."""
+        ...
 
 
 class NullAuditStore:
@@ -120,6 +121,12 @@ class NullAuditStore:
 
     def get_run(self, run_id: str) -> dict[str, Any] | None:
         return None
+
+    def orders_between(self, start: datetime, end: datetime) -> list[dict[str, Any]]:
+        return []
+
+    def analysis_totals(self, run_id_prefix: str) -> dict[str, int]:
+        return {"analyses": 0, "input_tokens": 0, "output_tokens": 0}
 
 
 class SqlAuditStore:
@@ -349,8 +356,8 @@ class SqlAuditStore:
                     run_id=row["run_id"],
                     kind=row["kind"],
                     status=row["status"],
-                    started_at=_utc(row["started_at"]) or row["started_at"],
-                    finished_at=_utc(row["finished_at"]),
+                    started_at=row["started_at"],
+                    finished_at=row["finished_at"],
                     summary=row["summary"],
                 )
                 for row in rows
@@ -398,6 +405,37 @@ class SqlAuditStore:
             }
 
         return self._read(f"run {run_id}", read)
+
+    def orders_between(self, start: datetime, end: datetime) -> list[dict[str, Any]]:
+        table = schema.orders
+
+        def read(connection: sa.Connection) -> list[dict[str, Any]]:
+            query = (
+                sa.select(table)
+                .where(table.c.submitted_at >= start, table.c.submitted_at < end)
+                .order_by(table.c.submitted_at, table.c.client_order_id)
+            )
+            return [dict(row) for row in connection.execute(query).mappings()]
+
+        return self._read("orders", read)
+
+    def analysis_totals(self, run_id_prefix: str) -> dict[str, int]:
+        table = schema.analyses
+
+        def read(connection: sa.Connection) -> dict[str, int]:
+            query = sa.select(
+                sa.func.count(table.c.id),
+                sa.func.coalesce(sa.func.sum(table.c.input_tokens), 0),
+                sa.func.coalesce(sa.func.sum(table.c.output_tokens), 0),
+            ).where(table.c.run_id.startswith(run_id_prefix, autoescape=True))
+            count, inputs, outputs = connection.execute(query).one()
+            return {
+                "analyses": int(count),
+                "input_tokens": int(inputs),
+                "output_tokens": int(outputs),
+            }
+
+        return self._read("analysis totals", read)
 
 
 class AuditRecorder:

@@ -149,6 +149,18 @@ class OrchestrationConfig(_Strict):
     close_settle_seconds: int = Field(default=30, ge=5, le=300)
 
 
+class ReportingConfig(_Strict):
+    """The daily report. Delivery to a webhook needs REPORT_WEBHOOK_URL (a secret)."""
+
+    benchmark_symbol: str = "SPY"
+    output_dir: str = "reports"
+    # Calendar days of history for the performance-to-date section.
+    history_days: int = Field(default=365, ge=7, le=3650)
+    # Your actual LLM prices, to show cost in dollars. Unset: tokens only, never a guess.
+    llm_usd_per_million_input_tokens: Decimal | None = Field(default=None, ge=0)
+    llm_usd_per_million_output_tokens: Decimal | None = Field(default=None, ge=0)
+
+
 class StorageConfig(_Strict):
     """The audit trail. The database URL is a secret (DATABASE_URL), not config."""
 
@@ -170,6 +182,7 @@ class AppConfig(_Strict):
     execution: ExecutionConfig = ExecutionConfig()
     storage: StorageConfig = StorageConfig()
     orchestration: OrchestrationConfig = OrchestrationConfig()
+    reporting: ReportingConfig = ReportingConfig()
 
     @model_validator(mode="after")
     def _environment_matches_broker(self) -> AppConfig:

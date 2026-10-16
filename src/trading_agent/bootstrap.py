@@ -7,6 +7,8 @@ testable with fakes and lets us swap vendors through config.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import date
+from pathlib import Path
 from typing import Any
 
 import anyio
@@ -32,6 +34,8 @@ from trading_agent.llm.openai_provider import OpenAIProvider
 from trading_agent.mcp_server.server import build_server
 from trading_agent.mcp_server.tools import ResearchTools
 from trading_agent.orchestration.cycle import CycleServices
+from trading_agent.reporting.delivery import post_webhook, save_report
+from trading_agent.reporting.report import ReportBuilder, render_markdown
 from trading_agent.risk.engine import RiskEngine
 from trading_agent.settings.loader import ConfigError
 from trading_agent.settings.models import AppConfig
@@ -180,6 +184,30 @@ class Container:
             market_clock=broker.get_clock,
             orders_since=self.build_order_port().get_orders_since,
             recorder=self.build_recorder(),
+            report=self.publish_report,
+        )
+
+    def publish_report(self, day: date, *, send: bool = True) -> str:
+        """Build the day's report, save it, and post it to the webhook if one is set."""
+        report = self.build_report_builder().build(day)
+        markdown = render_markdown(report)
+        md_path, _ = save_report(report, markdown, Path(self.config.reporting.output_dir))
+        url = self.report_webhook_url()
+        if send and url:
+            post_webhook(url, markdown)
+            return f"saved {md_path}; sent to the webhook"
+        return f"saved {md_path}"
+
+    def report_webhook_url(self) -> str | None:
+        value = self.secrets.report_webhook_url
+        return value.get_secret_value() if value and value.get_secret_value() else None
+
+    def build_report_builder(self, store: AuditStore | None = None) -> ReportBuilder:
+        return ReportBuilder(
+            store or self.build_audit_store(),
+            self.build_market_data(),
+            self.build_broker(),
+            self.config,
         )
 
     def build_llm_gateway(self) -> LLMGateway:

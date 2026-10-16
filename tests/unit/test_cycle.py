@@ -658,3 +658,53 @@ def test_run_forever_can_stop_before_starting(tmp_path: Path) -> None:
     h = Harness(tmp_path)
     h.cycle.run_forever(should_stop=lambda: True)
     assert h.calls == []
+
+
+# ---------- The report step ----------
+
+
+def test_report_runs_last_with_the_days_result(tmp_path: Path) -> None:
+    h = Harness(tmp_path)
+    seen: list[tuple[date, str | None]] = []
+
+    def report(day: date) -> str:
+        (run,) = h.rows(schema.runs)
+        seen.append((day, run["status"]))  # the result is already recorded
+        return "saved reports/2026-10-15.md"
+
+    result = _rebuild(h, report=report).run_day(THURSDAY)
+    assert seen == [(THURSDAY, "traded")]
+    assert result.steps["report"] == "ok"
+    (step,) = [s for s in h.rows(schema.run_steps) if s["step"] == "report"]
+    assert step["detail"] == "saved reports/2026-10-15.md"
+
+
+def test_report_failure_is_contained(tmp_path: Path) -> None:
+    h = Harness(tmp_path)
+    result = _rebuild(h, report=_boom).run_day(THURSDAY)
+    assert result.steps["report"] == "error"
+    assert result.status == "traded"
+
+
+def test_no_report_service_means_no_report_step(tmp_path: Path) -> None:
+    h = Harness(tmp_path)
+    assert "report" not in h.cycle.run_day(THURSDAY).steps
+
+
+def test_finished_report_is_not_repeated_on_resume(tmp_path: Path) -> None:
+    setup = Harness(tmp_path)
+    store = _resumed_store(
+        setup,
+        {
+            "preflight": "ok",
+            "analysis": "no_trade",
+            "entry": "skipped",
+            "close": "ok",
+            "reconcile": "ok",
+            "report": "ok",
+        },
+    )
+    h = Harness(tmp_path, start=at(15, 55), store=store)
+    calls: list[date] = []
+    _rebuild(h, report=lambda day: calls.append(day) or "x").run_day(THURSDAY)
+    assert calls == []

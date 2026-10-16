@@ -38,7 +38,7 @@ from trading_agent.settings.models import AppConfig
 from trading_agent.storage.store import AuditError, AuditRecorder, AuditStore
 
 MAX_SLEEP_SECONDS = 60  # wake at least this often while waiting, to log and stay responsive
-STEPS = ("preflight", "analysis", "entry", "close", "reconcile")
+STEPS = ("preflight", "analysis", "entry", "close", "reconcile", "report")
 
 
 class ExecutorLike(Protocol):
@@ -60,6 +60,8 @@ class CycleServices:
     market_clock: Callable[[], MarketClock]
     orders_since: Callable[[datetime], tuple[BrokerOrder, ...]]
     recorder: AuditRecorder
+    # Builds, saves, and sends the day's report; returns a short description. Optional.
+    report: Callable[[date], str] | None = None
 
 
 @dataclass(frozen=True)
@@ -226,8 +228,11 @@ class DailyCycle:
         else:
             status, summary = "no_trade", steps.get("entry", "no entry")
         self._record("run result", lambda s: s.finish_run(run_id, status, summary))
+        self._report(run_id, session, done)  # after the result, so the report includes it
         self._log.info("cycle.day_finished", run_id=run_id, status=status, summary=summary)
-        return DayResult(run_id=run_id, day=day, status=status, summary=summary, steps=steps)
+        return DayResult(
+            run_id=run_id, day=day, status=status, summary=summary, steps=dict(self._steps)
+        )
 
     def _preflight(self, run_id: str, session: Session, done: dict[str, str]) -> bool:
         """Returns True when trading must halt for the day."""
@@ -379,6 +384,17 @@ class DailyCycle:
             return
         self._record("orders", lambda s: s.record_orders(None, orders))
         self._step(run_id, "reconcile", "ok", f"synced {len(orders)} order(s)", started)
+
+    def _report(self, run_id: str, session: Session, done: dict[str, str]) -> None:
+        if "report" in done or self._services.report is None:
+            return
+        started = self._now()
+        try:
+            detail = self._services.report(session.day)
+        except Exception as exc:
+            self._step(run_id, "report", "error", str(exc), started)
+            return
+        self._step(run_id, "report", "ok", detail, started)
 
     # ---------- Forever ----------
 

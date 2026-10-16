@@ -19,8 +19,8 @@ risk engine, executes on a broker, and reports the result against the S&P 500.
 | 5 | Order execution (paper): idempotent entries, broker-side stops, managed exits | Done |
 | 6 | Audit trail: runs, analyses, tool calls, risk checks, orders, events (PostgreSQL) | Done |
 | 7 | Daily cycle: scheduled steps, resume after restart, holidays and early closes | Done |
-| 8 | Daily report | Next |
-| 9 | Critic agent | Planned |
+| 8 | Daily report: P&L vs SPY, performance to date, Markdown/JSON, webhook | Done |
+| 9 | Critic agent | Next |
 | 10 | Evaluation | Planned |
 | 11 | Go live ($100) | Planned |
 
@@ -45,7 +45,8 @@ risk engine, executes on a broker, and reports the result against the S&P 500.
 Key rules (see [ADR 0001](docs/adr/0001-architecture.md), [ADR 0002](docs/adr/0002-market-data.md),
 [ADR 0003](docs/adr/0003-mcp-tools.md), [ADR 0004](docs/adr/0004-analyst-agent.md),
 [ADR 0005](docs/adr/0005-risk-engine.md), [ADR 0006](docs/adr/0006-order-execution.md),
-[ADR 0007](docs/adr/0007-audit-trail.md), and [ADR 0008](docs/adr/0008-daily-cycle.md)):
+[ADR 0007](docs/adr/0007-audit-trail.md), [ADR 0008](docs/adr/0008-daily-cycle.md),
+and [ADR 0009](docs/adr/0009-daily-report.md)):
 - The AI has read-only tools; it can never place an order directly. Tool inputs are
   validated and bounded, and each session has a call budget.
 - Every model call goes through the LLM gateway (pinned model, fallback, token caps, logs).
@@ -113,6 +114,7 @@ Ready
 | `make test-paper-orders` | Round-trip a real order on the PAPER account (market hours) |
 | `uv run trading-agent run` | Run the daily cycle on the PAPER account, every trading day (`--once` for today only) |
 | `uv run trading-agent cycle-status` | Today's cycle: each step's status and detail |
+| `uv run trading-agent report` | Today's report (`--date`, `--json`, `--send`); saved to `reports/` |
 | `uv run trading-agent db upgrade` | Create or migrate the audit database (`DATABASE_URL`) |
 | `uv run trading-agent runs` | Recent runs from the audit trail |
 | `uv run trading-agent show-run RUN_ID` | Everything recorded for one run (JSON) |
@@ -136,7 +138,7 @@ src/trading_agent/
   risk/                  eligibility rules, risk engine, position sizing
   storage/               audit trail: schema, Alembic migrations, store
   orchestration/         the daily cycle: schedule, steps, resume, market calendar
-  reporting/             (upcoming phase)
+  reporting/             daily report: trade P&L, SPY benchmark, Markdown/JSON, webhook
   bootstrap.py           composition root
   health.py              pre-flight checks
   cli.py                 `trading-agent` command
@@ -157,8 +159,17 @@ docs/adr/                architecture decision records
 | manage | every minute | take profit, keep the stop in place |
 | close | 15:50 | force-close and verify the account is flat (earlier on half-days) |
 | reconcile | 16:15 | sync final order statuses and fills |
+| report | after reconcile | daily report saved to `reports/`, and sent to `REPORT_WEBHOOK_URL` if set |
 
 Each step is recorded once, so a restarted process resumes where it left off.
+
+## Daily report
+
+Each trading day ends with a report (also on demand: `trading-agent report --date 2026-10-15`):
+the analysis and its evidence, the risk decision, the trade's fills and P&L, the same-day
+SPY open-to-close move for comparison, and performance to date. Only trades placed by the
+daily cycle count toward performance. Set your LLM prices under `reporting:` in
+`config/base.yaml` to see cost in dollars as well as tokens.
 
 ## Audit database
 

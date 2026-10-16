@@ -84,3 +84,12 @@ orchestration:
   manage_interval_seconds: 60     # how often open positions are managed
   early_close_buffer_minutes: 10  # on half-days, force-close this long before the close
   close_settle_seconds: 30        # wait before verifying the account is flat
+
+# Daily report, written after the close (and on demand: `trading-agent report`).
+reporting:
+  benchmark_symbol: SPY       # trades are compared with its open-to-close move that day
+  output_dir: reports         # one Markdown and one JSON file per day
+  history_days: 365           # window for the performance-to-date section
+  # Set your actual LLM prices to see cost in dollars; left unset, only tokens are shown.
+  llm_usd_per_million_input_tokens: null
+  llm_usd_per_million_output_tokens: null

@@ -231,3 +231,18 @@ def test_live_trading_requires_explicit_confirmation(config_dir: Path) -> None:
 
 def test_paper_trading_needs_no_confirmation(config_dir: Path) -> None:
     assert_live_trading_allowed(load_config("paper", config_dir), make_secrets())
+
+
+def test_repo_config_reporting(config_dir: Path) -> None:
+    reporting = load_config("paper", config_dir).reporting
+    assert reporting.benchmark_symbol == "SPY"
+    assert reporting.output_dir == "reports"
+    assert reporting.llm_usd_per_million_input_tokens is None
+
+
+@pytest.mark.parametrize(
+    "override", [{"history_days": 3}, {"llm_usd_per_million_input_tokens": -1}]
+)
+def test_invalid_reporting_settings_are_rejected(override: dict[str, object]) -> None:
+    with pytest.raises(ValueError, match="reporting"):
+        AppConfig.model_validate({"reporting": override})

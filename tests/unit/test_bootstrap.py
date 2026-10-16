@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+from datetime import date
 from pathlib import Path
 
 import pytest
 from pydantic import SecretStr
 
-from tests.conftest import make_secrets
+from tests.conftest import FakeBroker, FakeMarketData, make_secrets
 from trading_agent.agents import AnalystAgent
 from trading_agent.bootstrap import Container
 from trading_agent.data import AlpacaMarketData, AlpacaNews, MarketDataCollector
@@ -180,3 +181,30 @@ def test_cycle_services_refuse_live(config_dir: Path) -> None:
     container = Container(config=load_config("live", config_dir), secrets=secrets)
     with pytest.raises(ExecutionDisabledError):
         container.build_cycle_services()
+
+
+def test_publish_report_saves_and_sends(
+    config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from trading_agent import bootstrap as module
+    from trading_agent.reporting.report import ReportBuilder
+
+    secrets = make_secrets(report_webhook_url=SecretStr("https://hooks.example/x"))
+    container = Container(config=load_config("paper", config_dir), secrets=secrets)
+    builder = ReportBuilder(NullAuditStore(), FakeMarketData(), FakeBroker(), container.config)
+    monkeypatch.setattr(Container, "build_report_builder", lambda self, store=None: builder)
+    sent: list[str] = []
+    monkeypatch.setattr(module, "post_webhook", lambda url, text: sent.append(url))
+
+    detail = container.publish_report(date(2026, 10, 15))
+    assert detail == f"saved {Path('reports') / '2026-10-15.md'}; sent to the webhook"
+    assert sent == ["https://hooks.example/x"]
+    assert (tmp_path / "reports" / "2026-10-15.json").exists()
+
+    assert container.publish_report(date(2026, 10, 15), send=False).endswith("2026-10-15.md")
+    assert len(sent) == 1
+
+
+def test_report_webhook_url(config_dir: Path) -> None:
+    container = Container(config=load_config("paper", config_dir), secrets=make_secrets())
+    assert container.report_webhook_url() is None

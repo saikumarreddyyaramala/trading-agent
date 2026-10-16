@@ -23,6 +23,7 @@ htmlcov/
 *.db
 *.sqlite
 /data/
+/reports/
 logs/
 
 # Editors / OS

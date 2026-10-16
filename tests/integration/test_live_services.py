@@ -25,8 +25,10 @@ from trading_agent.data.quality import bar_issues
 from trading_agent.domain.models import ChatMessage, Evidence, LLMRequest, TradeProposal
 from trading_agent.mcp_server import ALLOWED_TOOLS
 from trading_agent.orchestration.cycle import DailyCycle
+from trading_agent.reporting.report import render_markdown
 from trading_agent.settings import Secrets, load_config
 from trading_agent.settings.secrets import LLM_SECRET_FIELDS
+from trading_agent.storage.store import NullAuditStore
 
 pytestmark = pytest.mark.integration
 
@@ -194,6 +196,19 @@ def test_cycle_session_from_the_real_market_clock() -> None:
         assert session.day == today
         assert session.force_close <= session.market_close
         assert session.trade_start < session.trade_end < session.force_close
+
+
+def test_report_benchmark_from_real_bars() -> None:
+    """A report for a recent weekday, built from real SPY bars (read-only, no database)."""
+    container = _require("alpaca_api_key", "alpaca_secret_key")
+    zone = ZoneInfo(container.config.schedule.timezone)
+    day = datetime.now(zone).date() - timedelta(days=7)
+    while day.weekday() >= 5:
+        day -= timedelta(days=1)
+    report = container.build_report_builder(NullAuditStore()).build(day)
+    assert report.account_equity is not None
+    assert report.benchmark_pct is not None or any("benchmark" in w for w in report.warnings)
+    assert "# Daily report" in render_markdown(report)
 
 
 @pytest.mark.paper_orders

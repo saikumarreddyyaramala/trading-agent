@@ -28,11 +28,12 @@ from trading_agent.data import MarketDataCollector
 from trading_agent.domain.models import Evidence, LLMUsage, RiskDecision, TradeProposal
 from trading_agent.execution.executor import Executor
 from trading_agent.orchestration.cycle import DayResult
+from trading_agent.reporting.delivery import DeliveryError
 from trading_agent.risk import RiskEngine
 from trading_agent.settings.models import AppConfig
 from trading_agent.storage import schema
 from trading_agent.storage.database import head_revision, make_engine, upgrade
-from trading_agent.storage.store import SqlAuditStore
+from trading_agent.storage.store import NullAuditStore, SqlAuditStore
 
 runner = CliRunner()
 
@@ -789,3 +790,105 @@ def test_cycle_status(config_dir: Path, audit_db: sa.Engine) -> None:
         cli.app, ["cycle-status", "--date", "Oct 15", "--config-dir", str(config_dir)]
     )
     assert bad.exit_code == 2
+
+
+# ---------- report ----------
+
+
+def _use_fake_report(monkeypatch: pytest.MonkeyPatch) -> None:
+    from trading_agent.reporting.report import ReportBuilder
+
+    def build(self: Container, store: object = None) -> ReportBuilder:
+        return ReportBuilder(
+            store or NullAuditStore(),  # type: ignore[arg-type]
+            healthy_market_data("SPY"),
+            FakeBroker(equity="100000"),
+            self.config,
+            clock=lambda: NOW,
+        )
+
+    monkeypatch.setattr(Container, "build_report_builder", build)
+
+
+def test_report_prints_and_saves(
+    config_dir: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _use_fake_report(monkeypatch)
+    result = runner.invoke(
+        cli.app, ["report", "--date", "2026-10-15", "--config-dir", str(config_dir)]
+    )
+    assert result.exit_code == 0, result.output
+    assert "# Daily report: Thursday 2026-10-15" in result.stdout
+    assert (tmp_path / "reports" / "2026-10-15.md").exists()
+    assert (tmp_path / "reports" / "2026-10-15.json").exists()
+
+
+def test_report_json_without_saving(
+    config_dir: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _use_fake_report(monkeypatch)
+    result = runner.invoke(
+        cli.app,
+        ["report", "--date", "2026-10-15", "--json", "--no-save", "--config-dir", str(config_dir)],
+    )
+    assert json.loads(result.stdout)["run_id"] == "daily-20261015"
+    assert not (tmp_path / "reports").exists()
+
+
+def test_report_with_the_audit_trail(
+    config_dir: Path, monkeypatch: pytest.MonkeyPatch, audit_db: sa.Engine
+) -> None:
+    _use_fake_report(monkeypatch)
+    store = SqlAuditStore(audit_db, AppConfig())
+    store.start_run("daily-20261015", "daily")
+    store.finish_run("daily-20261015", "no_trade", "no verified proposal")
+    result = runner.invoke(
+        cli.app, ["report", "--date", "2026-10-15", "--no-save", "--config-dir", str(config_dir)]
+    )
+    assert "**NO_TRADE**: no verified proposal" in result.stdout
+
+
+def test_report_send(config_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _use_fake_report(monkeypatch)
+    sent: list[str] = []
+    monkeypatch.setattr(cli, "post_webhook", lambda url, text: sent.append(url))
+    monkeypatch.setenv("REPORT_WEBHOOK_URL", "https://hooks.example/x")
+    result = runner.invoke(
+        cli.app,
+        ["report", "--date", "2026-10-15", "--send", "--no-save", "--config-dir", str(config_dir)],
+    )
+    assert result.exit_code == 0, result.output
+    assert sent == ["https://hooks.example/x"]
+    assert "Sent to the webhook." in result.output
+
+
+def test_report_send_without_url_exits_2(config_dir: Path) -> None:
+    result = runner.invoke(cli.app, ["report", "--send", "--config-dir", str(config_dir)])
+    assert result.exit_code == 2
+    assert "REPORT_WEBHOOK_URL is not set" in result.output
+
+
+def test_report_delivery_failure_exits_1(config_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _use_fake_report(monkeypatch)
+
+    def fail(url: str, text: str) -> None:
+        raise DeliveryError("webhook rejected the report: HTTP 403")
+
+    monkeypatch.setattr(cli, "post_webhook", fail)
+    monkeypatch.setenv("REPORT_WEBHOOK_URL", "https://hooks.example/x")
+    result = runner.invoke(
+        cli.app, ["report", "--send", "--no-save", "--config-dir", str(config_dir)]
+    )
+    assert result.exit_code == 1
+    assert "HTTP 403" in result.output
+
+
+def test_report_bad_date_and_required_store(config_dir: Path) -> None:
+    bad = runner.invoke(cli.app, ["report", "--date", "yesterday", "--config-dir", str(config_dir)])
+    assert bad.exit_code == 2
+    (config_dir / "paper.yaml").write_text(
+        "environment: paper\nbroker:\n  paper: true\nstorage:\n  required: true\n",
+        encoding="utf-8",
+    )
+    result = runner.invoke(cli.app, ["report", "--config-dir", str(config_dir)])
+    assert result.exit_code == 2

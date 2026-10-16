@@ -8,6 +8,7 @@ Migrations in `storage/migrations` must match this module (a test checks it).
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
@@ -40,8 +41,32 @@ class Exact(sa.types.TypeDecorator[Decimal]):
         return Decimal(f"{Decimal(str(value)).normalize():f}")
 
 
+class UtcDateTime(sa.types.TypeDecorator[datetime]):
+    """Timestamps stored in UTC and always read back timezone-aware.
+
+    PostgreSQL does this natively. SQLite would silently drop the zone and store local wall
+    time (08:30 New York read back as 08:30 with no zone), so values are converted first.
+    """
+
+    impl = sa.DateTime(timezone=True)
+    cache_ok = True
+
+    def process_bind_param(self, value: Any, dialect: Dialect) -> Any:
+        if value is None:
+            return None
+        if value.tzinfo is None:
+            raise ValueError("timestamps must be timezone-aware")
+        return value.astimezone(UTC)
+
+    def process_result_value(self, value: Any, dialect: Dialect) -> datetime | None:
+        if value is None:
+            return None
+        stamp: datetime = value
+        return stamp.replace(tzinfo=UTC) if stamp.tzinfo is None else stamp.astimezone(UTC)
+
+
 JSONType = sa.JSON().with_variant(postgresql.JSONB(), "postgresql")
-Timestamp = sa.DateTime(timezone=True)
+Timestamp = UtcDateTime()
 
 metadata = sa.MetaData(
     naming_convention={

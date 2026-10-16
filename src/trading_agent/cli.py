@@ -28,6 +28,8 @@ from trading_agent.health import CheckStatus, format_age, overall_ok, run_health
 from trading_agent.mcp_server.server import build_server
 from trading_agent.observability.logging import configure_logging
 from trading_agent.orchestration.cycle import DailyCycle, DayResult
+from trading_agent.reporting.delivery import DeliveryError, post_webhook, save_report
+from trading_agent.reporting.report import render_markdown
 from trading_agent.settings.loader import ConfigError, load_config
 from trading_agent.settings.secrets import Secrets
 from trading_agent.storage.database import (
@@ -655,6 +657,52 @@ def cycle_status(
     typer.echo(f"{run_row['run_id']}: {run_row['status'] or 'running'}  {run_row['summary'] or ''}")
     for step in report["steps"]:
         typer.echo(f"  {step['step']:<10} {step['status']:<10} {step['detail']}")
+
+
+@app.command()
+def report(
+    day: Annotated[str | None, typer.Option("--date", help="YYYY-MM-DD (default: today).")] = None,
+    as_json: Annotated[
+        bool, typer.Option("--json", help="Print JSON instead of Markdown.")
+    ] = False,
+    save: Annotated[
+        bool, typer.Option("--save/--no-save", help="Write reports/<date>.md and .json.")
+    ] = True,
+    send: Annotated[bool, typer.Option("--send", help="Also post to REPORT_WEBHOOK_URL.")] = False,
+    env: EnvOption = None,
+    config_dir: ConfigDirOption = None,
+) -> None:
+    """The daily report: analysis, risk check, trade, P&L, and comparison with the benchmark."""
+    container = _container(env, config_dir)
+    zone = ZoneInfo(container.config.schedule.timezone)
+    try:
+        when = date.fromisoformat(day) if day else datetime.now(zone).date()
+    except ValueError as exc:
+        typer.secho(f"Invalid date: {day}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=2) from exc
+    if send and container.report_webhook_url() is None:
+        typer.secho("REPORT_WEBHOOK_URL is not set.", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=2)
+    try:
+        builder = container.build_report_builder(_recorder(container).store)
+    except ConfigError as exc:
+        typer.secho(f"Configuration error: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=2) from exc
+
+    built = builder.build(when)
+    markdown = render_markdown(built)
+    typer.echo(built.model_dump_json(indent=2) if as_json else markdown)
+    try:
+        if save:
+            md_path, _ = save_report(built, markdown, Path(container.config.reporting.output_dir))
+            typer.secho(f"Saved {md_path}", err=True)
+        url = container.report_webhook_url()
+        if send and url:
+            post_webhook(url, markdown)
+            typer.secho("Sent to the webhook.", err=True)
+    except DeliveryError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1) from exc
 
 
 @app.command("show-config")

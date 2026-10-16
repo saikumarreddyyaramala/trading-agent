@@ -366,3 +366,57 @@ def test_prices_read_back_without_exponents(db_engine: sa.Engine) -> None:
     report = store.get_run("r1")
     assert report is not None
     assert str(report["orders"][0]["filled_avg_price"]) == "102"
+
+
+# ---------- Report queries and timestamps ----------
+
+
+def test_orders_between_is_a_half_open_range(db_engine: sa.Engine) -> None:
+    store = _store(db_engine)
+    store.start_run("r1", "daily")
+    at = datetime(2026, 10, 15, 14, 0, tzinfo=UTC)
+    store.record_orders(
+        "r1",
+        [
+            _order("ta-r1-entry", submitted_at=at),
+            _order("late", side="sell", submitted_at=at + timedelta(hours=10)),
+        ],
+    )
+    rows = store.orders_between(at, at + timedelta(hours=10))
+    assert [r["client_order_id"] for r in rows] == ["ta-r1-entry"]
+    assert rows[0]["submitted_at"] == at
+
+
+def test_analysis_totals_by_run_prefix(db_engine: sa.Engine) -> None:
+    store = _store(db_engine)
+    for run_id in ("daily-1", "daily-2", "manual-1"):
+        store.start_run(run_id, "x")
+        store.record_analysis(_analysis(run_id).model_copy(update={"tool_calls": ()}))
+    assert store.analysis_totals("daily-") == {
+        "analyses": 2,
+        "input_tokens": 2000,
+        "output_tokens": 400,
+    }
+    assert store.analysis_totals("none-")["analyses"] == 0
+
+
+def test_timestamps_are_stored_in_utc_whatever_zone_they_come_in(db_engine: sa.Engine) -> None:
+    from zoneinfo import ZoneInfo
+
+    store = _store(db_engine)
+    store.start_run("r1", "daily")
+    local = datetime(2026, 10, 15, 8, 30, tzinfo=ZoneInfo("America/New_York"))
+    store.record_step("r1", "preflight", "ok", "", local)
+    report = store.get_run("r1")
+    assert report is not None
+    started = report["steps"][0]["started_at"]
+    assert started == local
+    assert started.tzinfo is not None
+    assert started.hour == 12  # 08:30 New York is 12:30 UTC
+
+
+def test_naive_timestamps_are_refused(db_engine: sa.Engine) -> None:
+    store = _store(db_engine)
+    store.start_run("r1", "daily")
+    with pytest.raises(AuditError, match="timezone-aware"):
+        store.record_step("r1", "preflight", "ok", "", datetime(2026, 10, 15, 8, 30))

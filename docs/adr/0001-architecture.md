@@ -57,4 +57,4 @@ real services are opt-in and never run in CI.
   interviewers ask about.
 
 ## Planned decisions
-- 0009: Daily report contents and delivery (Phase 8)
+- 0010: Critic agent and how it may veto a proposal (Phase 9)
