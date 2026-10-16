@@ -7,7 +7,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from alpaca.data.enums import Adjustment, DataFeed
+from alpaca.data.enums import Adjustment, DataFeed, MostActivesBy
 from alpaca.data.timeframe import TimeFrameUnit
 
 from tests.conftest import NOW
@@ -200,6 +200,7 @@ def test_most_active_is_translated_and_sorted() -> None:
     assert stocks[0].volume == 900
     assert stocks[0].trade_count == 80
     assert screener.requests[0].top == 2
+    assert screener.requests[0].by is MostActivesBy.VOLUME
 
 
 @pytest.mark.parametrize("limit", [0, 101])

@@ -77,6 +77,7 @@ class LLMGateway:
                 output_tokens=response.usage.output_tokens,
                 latency_ms=response.latency_ms,
                 stop_reason=response.stop_reason,
+                tool_calls=len(response.tool_calls),
                 **request.tags,
             )
             return response

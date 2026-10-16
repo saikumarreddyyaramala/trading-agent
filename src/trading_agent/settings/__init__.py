@@ -6,6 +6,7 @@ from trading_agent.settings.loader import (
     load_config,
 )
 from trading_agent.settings.models import (
+    AnalystConfig,
     AppConfig,
     BrokerConfig,
     Environment,
@@ -18,6 +19,7 @@ from trading_agent.settings.models import (
 from trading_agent.settings.secrets import Secrets
 
 __all__ = [
+    "AnalystConfig",
     "AppConfig",
     "BrokerConfig",
     "ConfigError",

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import shutil
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
@@ -24,6 +25,7 @@ from trading_agent.domain.models import (
     MarketClock,
     NewsArticle,
     Quote,
+    ToolCall,
 )
 from trading_agent.llm.errors import LLMProviderError
 from trading_agent.settings.secrets import Secrets
@@ -113,11 +115,15 @@ class FakeBroker:
 
 
 class FakeProvider:
-    """Scripted LLM provider: each call pops the next outcome (a text or an exception)."""
+    """Scripted LLM provider: each call pops the next outcome.
 
-    def __init__(self, outcomes: list[str | Exception]) -> None:
+    An outcome is a final text, a tuple of tool calls to request, or an exception to raise.
+    """
+
+    def __init__(self, outcomes: Sequence[str | tuple[ToolCall, ...] | Exception]) -> None:
         self.outcomes = list(outcomes)
         self.calls: list[tuple[str, int]] = []
+        self.requests: list[LLMRequest] = []
 
     @property
     def name(self) -> str:
@@ -125,17 +131,24 @@ class FakeProvider:
 
     def complete(self, request: LLMRequest, *, model: str, max_tokens: int) -> LLMResponse:
         self.calls.append((model, max_tokens))
+        self.requests.append(request)
         outcome = self.outcomes.pop(0)
         if isinstance(outcome, Exception):
             raise outcome
+        calls = outcome if isinstance(outcome, tuple) else ()
         return LLMResponse(
-            text=outcome,
+            text=outcome if isinstance(outcome, str) else "",
             provider=self.name,
             model=model,
-            stop_reason="end_turn",
+            stop_reason="tool_use" if calls else "end_turn",
             usage=LLMUsage(input_tokens=10, output_tokens=2),
             latency_ms=5.0,
+            tool_calls=calls,
         )
+
+
+def tool_call(call_id: str, name: str, **arguments: Any) -> ToolCall:
+    return ToolCall(id=call_id, name=name, arguments_json=json.dumps(arguments))
 
 
 def provider_error(model: str = "m", *, fatal: bool = False) -> LLMProviderError:

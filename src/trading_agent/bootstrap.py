@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from trading_agent.agents.analyst import AnalystAgent
 from trading_agent.data.alpaca_market_data import AlpacaMarketData
 from trading_agent.data.alpaca_news import AlpacaNews
 from trading_agent.data.collector import MarketDataCollector
@@ -16,6 +17,7 @@ from trading_agent.execution.alpaca_broker import AlpacaBroker
 from trading_agent.llm.anthropic_provider import AnthropicProvider
 from trading_agent.llm.gateway import LLMGateway
 from trading_agent.llm.openai_provider import OpenAIProvider
+from trading_agent.mcp_server.server import build_server
 from trading_agent.mcp_server.tools import ResearchTools
 from trading_agent.settings.loader import ConfigError
 from trading_agent.settings.models import AppConfig
@@ -83,6 +85,12 @@ class Container:
             self.build_broker().get_clock,
             max_data_age_seconds=self.config.risk.max_data_age_seconds,
             max_calls=self.config.tools.max_calls_per_session,
+        )
+
+    def build_analyst(self) -> AnalystAgent:
+        """A fresh agent per run: its own tool budget, token usage, and audit trail."""
+        return AnalystAgent(
+            self.build_llm_gateway(), build_server(self.build_research_tools()), self.config
         )
 
     def build_llm_gateway(self) -> LLMGateway:

@@ -109,6 +109,17 @@ class ToolsConfig(_Strict):
     max_calls_per_session: int = Field(default=100, gt=0, le=1000)
 
 
+class AnalystConfig(_Strict):
+    """Limits for one analyst run. Hitting any limit ends the run with no trade."""
+
+    max_turns: int = Field(default=15, ge=2, le=50)
+    max_tool_calls_per_turn: int = Field(default=8, ge=1, le=20)
+    # Input + output tokens across the whole run (a cost ceiling).
+    max_total_tokens: int = Field(default=300_000, gt=0, le=5_000_000)
+    # Chances to fix an answer that fails validation or evidence checks.
+    repair_attempts: int = Field(default=1, ge=0, le=3)
+
+
 class AppConfig(_Strict):
     environment: Environment = Environment.PAPER
     kill_switch: bool = False
@@ -118,6 +129,7 @@ class AppConfig(_Strict):
     broker: BrokerConfig = BrokerConfig()
     market_data: MarketDataConfig = MarketDataConfig()
     tools: ToolsConfig = ToolsConfig()
+    analyst: AnalystConfig = AnalystConfig()
 
     @model_validator(mode="after")
     def _environment_matches_broker(self) -> AppConfig:

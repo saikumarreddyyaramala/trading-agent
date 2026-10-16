@@ -6,6 +6,7 @@ from trading_agent.domain.models import (
     Asset,
     Bar,
     ChatMessage,
+    Evidence,
     LLMRequest,
     LLMResponse,
     LLMUsage,
@@ -14,6 +15,10 @@ from trading_agent.domain.models import (
     NewsArticle,
     Quote,
     SymbolData,
+    ToolCall,
+    ToolResult,
+    ToolSpec,
+    TradeProposal,
 )
 from trading_agent.domain.ports import BrokerPort, LLMProviderPort, MarketDataPort, NewsPort
 
@@ -24,6 +29,7 @@ __all__ = [
     "Bar",
     "BrokerPort",
     "ChatMessage",
+    "Evidence",
     "LLMProviderPort",
     "LLMRequest",
     "LLMResponse",
@@ -35,4 +41,8 @@ __all__ = [
     "NewsPort",
     "Quote",
     "SymbolData",
+    "ToolCall",
+    "ToolResult",
+    "ToolSpec",
+    "TradeProposal",
 ]

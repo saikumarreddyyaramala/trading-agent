@@ -132,6 +132,28 @@ def test_tool_budget_must_be_sane(value: int) -> None:
         AppConfig.model_validate({"tools": {"max_calls_per_session": value}})
 
 
+def test_repo_config_analyst_limits(config_dir: Path) -> None:
+    analyst = load_config("paper", config_dir).analyst
+    assert analyst.max_turns == 15
+    assert analyst.max_tool_calls_per_turn == 8
+    assert analyst.max_total_tokens == 300_000
+    assert analyst.repair_attempts == 1
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        {"max_turns": 1},
+        {"max_tool_calls_per_turn": 0},
+        {"max_total_tokens": 0},
+        {"repair_attempts": 4},
+    ],
+)
+def test_invalid_analyst_limits_are_rejected(override: dict[str, object]) -> None:
+    with pytest.raises(ValueError, match="analyst"):
+        AppConfig.model_validate({"analyst": override})
+
+
 def test_live_trading_requires_explicit_confirmation(config_dir: Path) -> None:
     live = load_config("live", config_dir)
     with pytest.raises(ConfigError, match="LIVE_TRADING_CONFIRMED"):

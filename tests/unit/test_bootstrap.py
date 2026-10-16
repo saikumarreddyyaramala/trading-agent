@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from tests.conftest import make_secrets
+from trading_agent.agents import AnalystAgent
 from trading_agent.bootstrap import Container
 from trading_agent.data import AlpacaMarketData, AlpacaNews, MarketDataCollector
 from trading_agent.execution import AlpacaBroker
@@ -91,3 +92,17 @@ def test_only_the_selected_vendor_key_is_required(config_dir: Path) -> None:
         config=load_config("paper", config_dir), secrets=make_secrets(anthropic_api_key=None)
     )
     assert container.build_llm_gateway().provider_name == "openai"
+
+
+def test_builds_analyst(config_dir: Path) -> None:
+    container = Container(config=load_config("paper", config_dir), secrets=make_secrets())
+    assert isinstance(container.build_analyst(), AnalystAgent)
+
+
+@pytest.mark.parametrize("missing", ["alpaca_api_key", "openai_api_key"])
+def test_analyst_needs_data_and_llm_keys(config_dir: Path, missing: str) -> None:
+    container = Container(
+        config=load_config("paper", config_dir), secrets=make_secrets(**{missing: None})
+    )
+    with pytest.raises(ConfigError, match=missing.upper()):
+        container.build_analyst()

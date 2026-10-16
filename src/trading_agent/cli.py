@@ -7,9 +7,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Any
 
+import anyio
 import typer
 
 from trading_agent import __version__
+from trading_agent.agents.analyst import AnalystResult
 from trading_agent.bootstrap import Container
 from trading_agent.data.errors import MarketDataError
 from trading_agent.domain.models import SymbolData
@@ -178,6 +180,63 @@ def market_data(
             typer.echo(f"  {symbol}: {reason}")
 
     raise typer.Exit(code=1 if snapshot.rejected else 0)
+
+
+def _print_analysis(result: AnalystResult) -> None:
+    colors = {"proposed": typer.colors.GREEN, "no_trade": typer.colors.YELLOW}
+    typer.secho(
+        f"{result.status.upper()}",
+        fg=colors.get(result.status, typer.colors.RED),
+        bold=True,
+        nl=False,
+    )
+    usage = result.usage
+    typer.echo(
+        f"  {result.reason}  [run {result.run_id}, {result.turns} turns, "
+        f"{len(result.tool_calls)} tool calls, "
+        f"{usage.input_tokens + usage.output_tokens:,} tokens, {result.duration_seconds:.1f}s]"
+    )
+    proposal = result.proposal
+    if proposal is not None:
+        if proposal.decision == "buy":
+            typer.echo(
+                f"Decision  BUY {proposal.symbol} near ${proposal.reference_price} "
+                f"(confidence {proposal.confidence})"
+            )
+        else:
+            typer.echo(f"Decision  NO TRADE (confidence {proposal.confidence})")
+        typer.echo(f"Thesis    {proposal.thesis}")
+        for item in proposal.evidence:
+            typer.echo(f"Evidence  - {item.claim} [{item.source_call_id}]")
+        for risk in proposal.risks:
+            typer.echo(f"Risk      - {risk}")
+    typer.echo("\nNo order was placed. Proposals go to the risk engine (Phase 4).")
+
+
+@app.command()
+def analyze(
+    env: EnvOption = None,
+    config_dir: ConfigDirOption = None,
+    as_json: Annotated[bool, typer.Option("--json", help="Machine-readable output.")] = False,
+) -> None:
+    """Run the analyst agent: research with read-only tools and propose one trade or none.
+
+    Calls the LLM (costs tokens). Never places an order.
+    """
+    container = _container(env, config_dir)
+    try:
+        agent = container.build_analyst()
+    except ConfigError as exc:
+        typer.secho(f"Configuration error: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=2) from exc
+
+    result = anyio.run(agent.run)
+
+    if as_json:
+        typer.echo(result.model_dump_json(indent=2))
+    else:
+        _print_analysis(result)
+    raise typer.Exit(code=1 if result.status == "failed" else 0)
 
 
 @app.command("mcp-server")

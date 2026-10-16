@@ -18,7 +18,12 @@ import structlog
 
 LogFormat = Literal["console", "json"]
 
-_SENSITIVE_KEY = re.compile(r"(api[_-]?key|secret|token|password|authorization)", re.IGNORECASE)
+# "token$" catches access_token / auth_token but not counters such as input_tokens.
+_SENSITIVE_KEY = re.compile(
+    r"(api[_-]?key|secret|password|authorization|credential|token$)", re.IGNORECASE
+)
+# Libraries that log every HTTP request or protocol message at INFO.
+_NOISY_LIBRARIES = ("httpx", "httpcore", "mcp", "anyio")
 REDACTED = "***REDACTED***"
 
 
@@ -29,6 +34,16 @@ def redact_secrets(
         if _SENSITIVE_KEY.search(key):
             event_dict[key] = REDACTED
     return event_dict
+
+
+class _StderrHandler(logging.Handler):
+    """Writes to whatever `sys.stderr` is at emit time, so redirected streams keep working."""
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            sys.stderr.write(self.format(record) + "\n")
+        except Exception:  # pragma: no cover - logging must never crash the caller
+            self.handleError(record)
 
 
 def configure_logging(level: str | None = None, fmt: LogFormat | None = None) -> None:
@@ -42,12 +57,15 @@ def configure_logging(level: str | None = None, fmt: LogFormat | None = None) ->
         else structlog.dev.ConsoleRenderer(colors=sys.stderr.isatty())
     )
 
+    shared: list[Any] = [
+        structlog.processors.add_log_level,
+        structlog.processors.TimeStamper(fmt="iso", utc=True),
+        redact_secrets,
+    ]
     structlog.configure(
         processors=[
             structlog.contextvars.merge_contextvars,
-            structlog.processors.add_log_level,
-            structlog.processors.TimeStamper(fmt="iso", utc=True),
-            redact_secrets,
+            *shared,
             structlog.processors.StackInfoRenderer(),
             structlog.processors.format_exc_info,
             renderer,
@@ -57,6 +75,22 @@ def configure_logging(level: str | None = None, fmt: LogFormat | None = None) ->
         logger_factory=lambda *_args: structlog.PrintLogger(file=sys.stderr),
         cache_logger_on_first_use=False,
     )
+
+    # Standard-library logs (SDKs, MCP) go through the same renderer and redaction, so the
+    # output stays one format. Owning the root handler also makes libraries that call
+    # logging.basicConfig() (the MCP server does) a no-op.
+    handler = _StderrHandler()
+    handler.setFormatter(
+        structlog.stdlib.ProcessorFormatter(
+            foreign_pre_chain=[structlog.stdlib.add_logger_name, *shared],
+            processors=[structlog.stdlib.ProcessorFormatter.remove_processors_meta, renderer],
+        )
+    )
+    root = logging.getLogger()
+    root.handlers = [handler]
+    root.setLevel(numeric_level)
+    for name in _NOISY_LIBRARIES:
+        logging.getLogger(name).setLevel(max(numeric_level, logging.WARNING))
 
 
 def get_logger(name: str) -> Any:

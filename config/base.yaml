@@ -55,3 +55,11 @@ market_data:
 # Read-only research tools exposed to AI agents (MCP server and in-process).
 tools:
   max_calls_per_session: 100  # stops a looping agent from hammering the data provider
+
+# Analyst agent: researches with the tools above and proposes one trade or none.
+# Hitting any limit ends the run with no trade.
+analyst:
+  max_turns: 15               # LLM round trips per run
+  max_tool_calls_per_turn: 8
+  max_total_tokens: 300000    # cost ceiling per run (input + output)
+  repair_attempts: 1          # chances to fix an answer that fails the evidence checks

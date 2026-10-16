@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -17,8 +18,10 @@ from tests.conftest import (
     make_quote,
 )
 from trading_agent import __version__, cli
+from trading_agent.agents.analyst import AnalystResult, ToolCallRecord
 from trading_agent.bootstrap import Container
 from trading_agent.data import MarketDataCollector
+from trading_agent.domain.models import Evidence, LLMUsage, TradeProposal
 
 runner = CliRunner()
 
@@ -194,3 +197,89 @@ def test_mcp_server_without_keys_exits_2(config_dir: Path) -> None:
     result = runner.invoke(cli.app, ["mcp-server", "--config-dir", str(config_dir)])
     assert result.exit_code == 2
     assert "missing market data credentials" in result.output
+
+
+# ---------- analyze ----------
+
+
+def _analysis(status: str, proposal: TradeProposal | None) -> AnalystResult:
+    return AnalystResult(
+        run_id="abc123",
+        status=status,  # type: ignore[arg-type]
+        reason="evidence verified" if status == "proposed" else "something",
+        proposal=proposal,
+        prompt_version="p1",
+        turns=3,
+        tool_calls=(ToolCallRecord(call_id="c1", tool="get_quote", arguments={}, is_error=False),),
+        usage=LLMUsage(input_tokens=1000, output_tokens=234),
+        started_at=NOW,
+        duration_seconds=4.2,
+    )
+
+
+BUY = TradeProposal(
+    decision="buy",
+    symbol="AAPL",
+    thesis="Strong tape.",
+    reference_price=Decimal("100.05"),
+    confidence="medium",
+    evidence=(
+        Evidence(claim="Tight spread", source_call_id="c1"),
+        Evidence(claim="Uptrend", source_call_id="c2"),
+    ),
+    risks=("Reversal",),
+)
+
+
+def _use_fake_analyst(monkeypatch: pytest.MonkeyPatch, result: AnalystResult) -> None:
+    class _Agent:
+        async def run(self) -> AnalystResult:
+            return result
+
+    monkeypatch.setattr(Container, "build_analyst", lambda self: _Agent())
+
+
+def test_analyze_prints_verified_proposal(
+    config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _use_fake_analyst(monkeypatch, _analysis("proposed", BUY))
+    result = runner.invoke(cli.app, ["analyze", "--config-dir", str(config_dir)])
+    assert result.exit_code == 0, result.output
+    assert "PROPOSED  evidence verified  [run abc123, 3 turns, 1 tool calls, 1,234 tokens" in (
+        result.output
+    )
+    assert "BUY AAPL near $100.05 (confidence medium)" in result.output
+    assert "Evidence  - Tight spread [c1]" in result.output
+    assert "Risk      - Reversal" in result.output
+    assert "No order was placed" in result.output
+
+
+def test_analyze_no_trade(config_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    proposal = TradeProposal(decision="no_trade", thesis="Quiet day.", confidence="high")
+    _use_fake_analyst(monkeypatch, _analysis("no_trade", proposal))
+    result = runner.invoke(cli.app, ["analyze", "--config-dir", str(config_dir)])
+    assert result.exit_code == 0
+    assert "NO TRADE (confidence high)" in result.output
+
+
+def test_analyze_failure_exits_1(config_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _use_fake_analyst(monkeypatch, _analysis("failed", None))
+    result = runner.invoke(cli.app, ["analyze", "--config-dir", str(config_dir)])
+    assert result.exit_code == 1
+    assert "FAILED" in result.output
+    assert "Decision" not in result.output
+
+
+def test_analyze_json(config_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _use_fake_analyst(monkeypatch, _analysis("proposed", BUY))
+    result = runner.invoke(cli.app, ["analyze", "--json", "--config-dir", str(config_dir)])
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "proposed"
+    assert payload["proposal"]["symbol"] == "AAPL"
+    assert payload["proposal"]["reference_price"] == "100.05"
+
+
+def test_analyze_without_keys_exits_2(config_dir: Path) -> None:
+    result = runner.invoke(cli.app, ["analyze", "--config-dir", str(config_dir)])
+    assert result.exit_code == 2
+    assert "missing" in result.output

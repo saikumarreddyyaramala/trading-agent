@@ -6,9 +6,9 @@ from typing import Any
 import openai
 import pytest
 
-from trading_agent.domain.models import ChatMessage, LLMRequest
+from trading_agent.domain.models import ChatMessage, LLMRequest, ToolCall, ToolResult, ToolSpec
 from trading_agent.llm.errors import LLMProviderError
-from trading_agent.llm.openai_provider import OpenAIProvider
+from trading_agent.llm.openai_provider import OpenAIProvider, input_items
 
 REQUEST = LLMRequest(system="be brief", messages=(ChatMessage(role="user", content="hi"),))
 
@@ -46,6 +46,7 @@ def _result(**overrides: Any) -> SimpleNamespace:
         "status": "completed",
         "incomplete_details": None,
         "usage": SimpleNamespace(input_tokens=20, output_tokens=5),
+        "output": [SimpleNamespace(type="message")],
     }
     values.update(overrides)
     return SimpleNamespace(**values)
@@ -110,3 +111,75 @@ def test_sdk_errors_become_provider_errors(error_cls: type[Exception], fatal: bo
         provider.complete(REQUEST, model="gpt-6.1-sol", max_tokens=10)
     assert caught.value.fatal is fatal
     assert caught.value.provider == "openai"
+
+
+# ---------- Tool calling ----------
+
+TOOL = ToolSpec(
+    name="get_quote",
+    description="Latest quote",
+    input_schema={"type": "object", "properties": {"symbol": {"type": "string"}}},
+)
+
+
+def test_tools_are_sent_as_functions() -> None:
+    provider, responses = _provider(_result())
+    provider.complete(REQUEST.model_copy(update={"tools": (TOOL,)}), model="m", max_tokens=10)
+    assert responses.kwargs["tools"] == [
+        {
+            "type": "function",
+            "name": "get_quote",
+            "description": "Latest quote",
+            "parameters": TOOL.input_schema,
+            "strict": False,
+        }
+    ]
+
+
+def test_no_tools_key_without_tools() -> None:
+    provider, responses = _provider(_result())
+    provider.complete(REQUEST, model="m", max_tokens=10)
+    assert "tools" not in responses.kwargs
+
+
+def test_function_calls_are_returned() -> None:
+    output = [
+        SimpleNamespace(type="reasoning"),
+        SimpleNamespace(
+            type="function_call", call_id="call_1", name="get_quote", arguments='{"symbol":"AAPL"}'
+        ),
+    ]
+    provider, _ = _provider(_result(output_text="", output=output))
+    response = provider.complete(REQUEST, model="m", max_tokens=10)
+    assert response.tool_calls == (
+        ToolCall(id="call_1", name="get_quote", arguments_json='{"symbol":"AAPL"}'),
+    )
+
+
+def test_tool_turns_become_function_items_in_order() -> None:
+    call = ToolCall(id="c1", name="get_quote", arguments_json='{"symbol":"AAPL"}')
+    messages = (
+        ChatMessage(role="user", content="research"),
+        ChatMessage(role="assistant", content="Looking.", tool_calls=(call,)),
+        ChatMessage(
+            role="user",
+            content="continue",
+            tool_results=(
+                ToolResult(call_id="c1", content='{"bid":"1"}'),
+                ToolResult(call_id="c2", content="bad symbol", is_error=True),
+            ),
+        ),
+    )
+    assert input_items(messages) == [
+        {"role": "user", "content": "research"},
+        {"role": "assistant", "content": "Looking."},
+        {
+            "type": "function_call",
+            "call_id": "c1",
+            "name": "get_quote",
+            "arguments": '{"symbol":"AAPL"}',
+        },
+        {"type": "function_call_output", "call_id": "c1", "output": '{"bid":"1"}'},
+        {"type": "function_call_output", "call_id": "c2", "output": "ERROR: bad symbol"},
+        {"role": "user", "content": "continue"},
+    ]

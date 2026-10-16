@@ -8,9 +8,9 @@ from __future__ import annotations
 
 from datetime import datetime
 from decimal import Decimal
-from typing import Literal
+from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class _Frozen(BaseModel):
@@ -152,15 +152,46 @@ class MarketDataSnapshot(_Frozen):
 # ---------- LLM ----------
 
 
-class ChatMessage(_Frozen):
-    role: Literal["user", "assistant"]
+class ToolSpec(_Frozen):
+    """A tool the model may call, described by a JSON schema for its arguments."""
+
+    name: str
+    description: str
+    input_schema: dict[str, Any]
+
+
+class ToolCall(_Frozen):
+    """A model's request to run a tool. Arguments stay raw JSON: the caller validates them."""
+
+    id: str
+    name: str
+    arguments_json: str
+
+
+class ToolResult(_Frozen):
+    call_id: str
     content: str
+    is_error: bool = False
+
+
+class ChatMessage(_Frozen):
+    """One conversation turn.
+
+    An assistant turn may request tools (`tool_calls`); the next user turn answers them
+    (`tool_results`). Plain turns carry only `content`.
+    """
+
+    role: Literal["user", "assistant"]
+    content: str = ""
+    tool_calls: tuple[ToolCall, ...] = ()
+    tool_results: tuple[ToolResult, ...] = ()
 
 
 class LLMRequest(_Frozen):
     system: str
     messages: tuple[ChatMessage, ...]
     max_tokens: int | None = None
+    tools: tuple[ToolSpec, ...] = ()
     # Free-form labels (run_id, agent name, ...) carried into logs and traces.
     tags: dict[str, str] = Field(default_factory=dict)
 
@@ -177,3 +208,51 @@ class LLMResponse(_Frozen):
     stop_reason: str | None
     usage: LLMUsage
     latency_ms: float
+    tool_calls: tuple[ToolCall, ...] = ()
+
+
+# ---------- Trade proposals ----------
+
+
+class Evidence(_Frozen):
+    """One claim backing a proposal, tied to the tool call that produced the data."""
+
+    claim: str = Field(min_length=1, max_length=400)
+    source_call_id: str = Field(min_length=1, max_length=100)
+
+
+class TradeProposal(_Frozen):
+    """The analyst's answer: one long intraday trade, or no trade.
+
+    It is only a proposal. Sizing, limits, and the go/no-go decision belong to the risk engine.
+    """
+
+    decision: Literal["buy", "no_trade"]
+    symbol: str | None = None
+    thesis: str = Field(min_length=1, max_length=2000)
+    reference_price: Decimal | None = Field(default=None, gt=0)
+    confidence: Literal["low", "medium", "high"]
+    evidence: tuple[Evidence, ...] = Field(default=(), max_length=10)
+    risks: tuple[str, ...] = Field(default=(), max_length=10)
+
+    @field_validator("symbol")
+    @classmethod
+    def _upper_symbol(cls, value: str | None) -> str | None:
+        return value.strip().upper() or None if value is not None else None
+
+    @model_validator(mode="after")
+    def _buy_is_complete(self) -> TradeProposal:
+        if self.decision == "buy":
+            missing = [
+                name
+                for name, ok in (
+                    ("symbol", self.symbol),
+                    ("reference_price", self.reference_price),
+                    ("at least 2 evidence items", len(self.evidence) >= 2),
+                    ("at least 1 risk", self.risks),
+                )
+                if not ok
+            ]
+            if missing:
+                raise ValueError(f"a buy proposal needs {', '.join(missing)}")
+        return self

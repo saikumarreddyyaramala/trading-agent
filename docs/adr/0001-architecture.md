@@ -57,4 +57,5 @@ real services are opt-in and never run in CI.
   interviewers ask about.
 
 ## Planned decisions
-- 0004: Workflow engine for the daily cycle (Phase 7)
+- 0005: Risk engine rules and order gating (Phase 4)
+- 0006: Workflow engine for the daily cycle (Phase 7)

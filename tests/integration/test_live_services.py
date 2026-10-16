@@ -128,3 +128,17 @@ def test_llm_round_trip() -> None:
         )
     )
     assert response.text.strip()
+
+
+@pytest.mark.skipif(os.environ.get("CI") == "true", reason="never spend LLM tokens in CI")
+def test_analyst_end_to_end() -> None:
+    """A real analyst run: real LLM, real Alpaca data. Costs tokens; places no order."""
+    container = _container()
+    provider = container.config.llm.provider
+    agent = _require(
+        "alpaca_api_key", "alpaca_secret_key", *LLM_SECRET_FIELDS[provider]
+    ).build_analyst()
+    result = anyio.run(agent.run)
+    print(result.model_dump_json(indent=2))  # visible with -s, for a human to judge the reasoning
+    assert result.status in {"proposed", "no_trade"}, result.reason
+    assert result.tool_calls, "the analyst should research before answering"

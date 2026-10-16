@@ -9,7 +9,7 @@ from decimal import Decimal
 from enum import Enum
 from typing import Any, Literal
 
-from alpaca.data.enums import Adjustment, DataFeed
+from alpaca.data.enums import Adjustment, DataFeed, MostActivesBy
 from alpaca.data.historical import ScreenerClient, StockHistoricalDataClient
 from alpaca.data.requests import MostActivesRequest, StockBarsRequest, StockLatestQuoteRequest
 from alpaca.data.timeframe import TimeFrame
@@ -142,7 +142,8 @@ class AlpacaMarketData:
         if not 1 <= limit <= MAX_MOST_ACTIVE:
             raise ValueError(f"limit must be between 1 and {MAX_MOST_ACTIVE}")
         try:
-            raw = self._screener.get_most_actives(MostActivesRequest(top=limit))
+            request = MostActivesRequest(top=limit, by=MostActivesBy.VOLUME)
+            raw = self._screener.get_most_actives(request)
         except Exception as exc:
             raise MarketDataError(
                 f"could not fetch most active stocks: {type(exc).__name__}: {exc}"
