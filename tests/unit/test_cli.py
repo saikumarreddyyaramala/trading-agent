@@ -21,7 +21,9 @@ from trading_agent import __version__, cli
 from trading_agent.agents.analyst import AnalystResult, ToolCallRecord
 from trading_agent.bootstrap import Container
 from trading_agent.data import MarketDataCollector
-from trading_agent.domain.models import Evidence, LLMUsage, TradeProposal
+from trading_agent.domain.models import Evidence, LLMUsage, RiskDecision, TradeProposal
+from trading_agent.risk import RiskEngine
+from trading_agent.settings.models import AppConfig
 
 runner = CliRunner()
 
@@ -283,3 +285,78 @@ def test_analyze_without_keys_exits_2(config_dir: Path) -> None:
     result = runner.invoke(cli.app, ["analyze", "--config-dir", str(config_dir)])
     assert result.exit_code == 2
     assert "missing" in result.output
+
+
+# ---------- risk-check ----------
+
+
+def _use_fake_risk(monkeypatch: pytest.MonkeyPatch, broker: FakeBroker) -> list[TradeProposal]:
+    seen: list[TradeProposal] = []
+
+    class _Engine:
+        def evaluate(self, proposal: TradeProposal) -> RiskDecision:
+            seen.append(proposal)
+            return RiskEngine(
+                broker,
+                healthy_market_data("AAPL"),
+                AppConfig(),
+                live_trading_confirmed=False,
+                clock=lambda: NOW,
+            ).evaluate(proposal)
+
+    monkeypatch.setattr(Container, "build_risk_engine", lambda self: _Engine())
+    return seen
+
+
+def test_risk_check_approves(config_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    seen = _use_fake_risk(monkeypatch, FakeBroker())
+    result = runner.invoke(
+        cli.app, ["risk-check", "aapl", "--price", "100.05", "--config-dir", str(config_dir)]
+    )
+    assert result.exit_code == 0, result.output
+    assert "PASS  Liquidity" in result.output
+    assert "APPROVED" in result.output
+    assert "Buy 0.4899 AAPL (~$49.03), limit $102.05, stop $95.09, target $110.11" in result.output
+    assert "No order was placed" in result.output
+    assert seen[0].symbol == "AAPL"
+
+
+def test_risk_check_rejects(config_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _use_fake_risk(monkeypatch, FakeBroker(market_open=False))
+    result = runner.invoke(
+        cli.app, ["risk-check", "AAPL", "--price", "100.05", "--config-dir", str(config_dir)]
+    )
+    assert result.exit_code == 1
+    assert "FAIL  Market open        the market is closed" in result.output
+    assert "REJECTED" in result.output
+
+
+def test_risk_check_json(config_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _use_fake_risk(monkeypatch, FakeBroker())
+    result = runner.invoke(
+        cli.app,
+        ["risk-check", "AAPL", "--price", "100.05", "--json", "--config-dir", str(config_dir)],
+    )
+    payload = json.loads(result.stdout)
+    assert payload["approved"] is True
+    assert payload["plan"]["limit_price"] == "102.05"
+
+
+@pytest.mark.parametrize("price", ["abc", "-5", "0"])
+def test_risk_check_rejects_bad_prices(
+    config_dir: Path, monkeypatch: pytest.MonkeyPatch, price: str
+) -> None:
+    _use_fake_risk(monkeypatch, FakeBroker())
+    result = runner.invoke(
+        cli.app, ["risk-check", "AAPL", "--price", price, "--config-dir", str(config_dir)]
+    )
+    assert result.exit_code == 2
+    assert "invalid input" in result.output
+
+
+def test_risk_check_without_keys_exits_2(config_dir: Path) -> None:
+    result = runner.invoke(
+        cli.app, ["risk-check", "AAPL", "--price", "100", "--config-dir", str(config_dir)]
+    )
+    assert result.exit_code == 2
+    assert "missing broker credentials" in result.output

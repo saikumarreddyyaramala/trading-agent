@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from alpaca.trading.enums import OrderSide, QueryOrderStatus
 
 from trading_agent.execution.alpaca_broker import AlpacaBroker, BrokerError, mask_account_number
 
@@ -70,3 +71,54 @@ def test_errors_are_wrapped() -> None:
 )
 def test_mask_account_number(raw: str | None, masked: str) -> None:
     assert mask_account_number(raw) == masked
+
+
+# ---------- Positions and orders ----------
+
+
+class _TradingClient:
+    def __init__(self, *, fail: bool = False) -> None:
+        self.fail = fail
+        self.order_filters: list[Any] = []
+
+    def get_all_positions(self) -> Any:
+        if self.fail:
+            raise ConnectionError("network down")
+        return [
+            SimpleNamespace(
+                symbol="AAPL", qty="0.1430", market_value="49.01", avg_entry_price="342.7"
+            )
+        ]
+
+    def get_orders(self, filter: Any) -> Any:
+        self.order_filters.append(filter)
+        if self.fail:
+            raise ConnectionError("network down")
+        return [SimpleNamespace(id="o1"), SimpleNamespace(id="o2")]
+
+
+def test_positions_are_translated() -> None:
+    broker = AlpacaBroker("k", "s", paper=True, client=_TradingClient())
+    (position,) = broker.get_positions()
+    assert position.symbol == "AAPL"
+    assert position.quantity == Decimal("0.1430")
+    assert position.market_value == Decimal("49.01")
+
+
+def test_buy_orders_since_queries_all_statuses() -> None:
+    client = _TradingClient()
+    since = datetime(2026, 10, 15, 4, 0, tzinfo=UTC)
+    assert AlpacaBroker("k", "s", paper=True, client=client).count_buy_orders_since(since) == 2
+    request = client.order_filters[0]
+    assert request.status is QueryOrderStatus.ALL
+    assert request.side is OrderSide.BUY
+    assert request.limit == 500
+    assert request.after is not None
+
+
+def test_position_and_order_errors_are_wrapped() -> None:
+    broker = AlpacaBroker("k", "s", paper=True, client=_TradingClient(fail=True))
+    with pytest.raises(BrokerError, match="could not fetch positions"):
+        broker.get_positions()
+    with pytest.raises(BrokerError, match="could not fetch orders"):
+        broker.count_buy_orders_since(datetime(2026, 10, 15, tzinfo=UTC))

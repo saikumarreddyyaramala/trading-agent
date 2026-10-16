@@ -24,6 +24,7 @@ from trading_agent.domain.models import (
     LLMUsage,
     MarketClock,
     NewsArticle,
+    Position,
     Quote,
     ToolCall,
 )
@@ -81,8 +82,21 @@ class FakeBroker:
         fail_account: bool = False,
         fail_clock: bool = False,
         market_open: bool = True,
+        equity: str = "100000",
+        cash: str = "100000",
+        positions: Sequence[Position] = (),
+        orders_today: int = 0,
+        fail_positions: bool = False,
+        fail_orders: bool = False,
     ) -> None:
         self._market_open = market_open
+        self._equity = Decimal(equity)
+        self._cash = Decimal(cash)
+        self.positions = tuple(positions)
+        self.orders_today = orders_today
+        self._fail_positions = fail_positions
+        self._fail_orders = fail_orders
+        self.orders_since: list[datetime] = []
         self._is_paper = is_paper
         self._trading_blocked = trading_blocked
         self._fail_account = fail_account
@@ -99,8 +113,8 @@ class FakeBroker:
             account_number_masked="****1234",
             status="ACTIVE",
             currency="USD",
-            cash=Decimal("100000"),
-            equity=Decimal("100000"),
+            cash=self._cash,
+            equity=self._equity,
             buying_power=Decimal("100000"),
             pattern_day_trader=False,
             trading_blocked=self._trading_blocked,
@@ -112,6 +126,17 @@ class FakeBroker:
         if self._fail_clock:
             raise RuntimeError("clock unavailable")
         return MarketClock(timestamp=NOW, is_open=self._market_open, next_open=NOW, next_close=NOW)
+
+    def get_positions(self) -> tuple[Position, ...]:
+        if self._fail_positions:
+            raise RuntimeError("positions unavailable")
+        return self.positions
+
+    def count_buy_orders_since(self, since: datetime) -> int:
+        self.orders_since.append(since)
+        if self._fail_orders:
+            raise RuntimeError("orders unavailable")
+        return self.orders_today
 
 
 class FakeProvider:
@@ -198,14 +223,22 @@ def make_bars(
     return tuple(bars)
 
 
-def make_asset(symbol: str = "AAPL", *, tradable: bool = True) -> Asset:
+def make_asset(
+    symbol: str = "AAPL",
+    *,
+    tradable: bool = True,
+    name: str | None = None,
+    exchange: str = "NASDAQ",
+    fractionable: bool = True,
+    status: str = "active",
+) -> Asset:
     return Asset(
         symbol=symbol,
-        name=f"{symbol} Inc.",
-        exchange="NASDAQ",
-        status="active",
+        name=name or f"{symbol} Inc.",
+        exchange=exchange,
+        status=status,
         tradable=tradable,
-        fractionable=True,
+        fractionable=fractionable,
     )
 
 

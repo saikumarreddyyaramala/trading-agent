@@ -19,6 +19,7 @@ from trading_agent.llm.gateway import LLMGateway
 from trading_agent.llm.openai_provider import OpenAIProvider
 from trading_agent.mcp_server.server import build_server
 from trading_agent.mcp_server.tools import ResearchTools
+from trading_agent.risk.engine import RiskEngine
 from trading_agent.settings.loader import ConfigError
 from trading_agent.settings.models import AppConfig
 from trading_agent.settings.secrets import (
@@ -85,12 +86,21 @@ class Container:
             self.build_broker().get_clock,
             max_data_age_seconds=self.config.risk.max_data_age_seconds,
             max_calls=self.config.tools.max_calls_per_session,
+            risk=self.config.risk,
         )
 
     def build_analyst(self) -> AnalystAgent:
         """A fresh agent per run: its own tool budget, token usage, and audit trail."""
         return AnalystAgent(
             self.build_llm_gateway(), build_server(self.build_research_tools()), self.config
+        )
+
+    def build_risk_engine(self) -> RiskEngine:
+        return RiskEngine(
+            self.build_broker(),
+            self.build_market_data(),
+            self.config,
+            live_trading_confirmed=self.secrets.live_trading_confirmed,
         )
 
     def build_llm_gateway(self) -> LLMGateway:

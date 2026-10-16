@@ -14,6 +14,7 @@ def test_system_prompt_uses_configured_rules(config_dir: Path) -> None:
     assert "$5 per share" in prompt
     assert "1,000,000 shares a day" in prompt
     assert "untrusted third-party data" in prompt
+    assert "Funds, ETFs, ETNs, and leveraged or inverse products are not allowed" in prompt
     assert '"decision": "buy" | "no_trade"' in prompt  # JSON braces survive formatting
 
 

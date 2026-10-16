@@ -40,6 +40,15 @@ class MarketClock(_Frozen):
     next_close: datetime
 
 
+class Position(_Frozen):
+    """An open position at the broker."""
+
+    symbol: str
+    quantity: Decimal
+    market_value: Decimal
+    avg_entry_price: Decimal
+
+
 # ---------- Market data ----------
 
 
@@ -255,4 +264,50 @@ class TradeProposal(_Frozen):
             ]
             if missing:
                 raise ValueError(f"a buy proposal needs {', '.join(missing)}")
+        return self
+
+
+# ---------- Risk decisions ----------
+
+
+class RiskCheck(_Frozen):
+    name: str
+    passed: bool
+    detail: str
+
+
+class OrderPlan(_Frozen):
+    """What the risk engine approved. Execution (Phase 5) must not exceed any of these values."""
+
+    symbol: str
+    side: Literal["buy"] = "buy"
+    quantity: Decimal = Field(gt=0)
+    fractional: bool
+    notional_usd: Decimal = Field(gt=0)
+    entry_reference_price: Decimal = Field(gt=0)
+    limit_price: Decimal = Field(gt=0)
+    stop_loss_price: Decimal = Field(gt=0)
+    take_profit_price: Decimal = Field(gt=0)
+
+
+class RiskDecision(_Frozen):
+    """The risk engine's verdict on one proposal, with every check for the audit trail."""
+
+    approved: bool
+    symbol: str | None
+    checks: tuple[RiskCheck, ...]
+    plan: OrderPlan | None
+    evaluated_at: datetime
+
+    @property
+    def failed_checks(self) -> tuple[RiskCheck, ...]:
+        return tuple(check for check in self.checks if not check.passed)
+
+    @model_validator(mode="after")
+    def _approval_is_consistent(self) -> RiskDecision:
+        # An approval without a plan, or with any failed check, must be impossible to build.
+        if self.approved and (self.plan is None or self.failed_checks or not self.checks):
+            raise ValueError("an approved decision needs a plan and only passed checks")
+        if not self.approved and self.plan is not None:
+            raise ValueError("a rejected decision cannot carry an order plan")
         return self

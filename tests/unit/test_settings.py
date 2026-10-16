@@ -122,6 +122,21 @@ def test_invalid_market_data_settings_are_rejected(override: dict[str, object]) 
         AppConfig.model_validate({"market_data": override})
 
 
+def test_repo_config_risk_additions(config_dir: Path) -> None:
+    risk = load_config("paper", config_dir).risk
+    assert risk.max_spread_pct == Decimal("0.5")
+    assert risk.exclude_funds is True
+    assert risk.volume_lookback_days == 20
+
+
+@pytest.mark.parametrize(
+    "override", [{"max_spread_pct": 0}, {"volume_lookback_days": 4}, {"volume_lookback_days": 121}]
+)
+def test_invalid_risk_additions_are_rejected(override: dict[str, object]) -> None:
+    with pytest.raises(ValueError, match="risk"):
+        AppConfig.model_validate({"risk": override})
+
+
 def test_repo_config_tool_budget(config_dir: Path) -> None:
     assert load_config("paper", config_dir).tools.max_calls_per_session == 100
 

@@ -20,6 +20,7 @@ from trading_agent.domain.models import (
     LLMResponse,
     MarketClock,
     NewsArticle,
+    Position,
     Quote,
 )
 
@@ -37,6 +38,12 @@ class BrokerPort(Protocol):
     def get_account(self) -> AccountSnapshot: ...
 
     def get_clock(self) -> MarketClock: ...
+
+    def get_positions(self) -> tuple[Position, ...]: ...
+
+    def count_buy_orders_since(self, since: datetime) -> int:
+        """Buy orders submitted at or after `since`, in any status (filled, open, canceled)."""
+        ...
 
 
 @runtime_checkable

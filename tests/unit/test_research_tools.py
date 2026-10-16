@@ -12,6 +12,8 @@ from tests.conftest import (
     FakeNews,
     healthy_market_data,
     make_article,
+    make_asset,
+    make_bars,
     make_quote,
 )
 from trading_agent.data.collector import MarketDataCollector
@@ -140,17 +142,66 @@ def test_get_asset() -> None:
     }
 
 
-def test_get_most_active_skips_symbols_other_tools_would_reject() -> None:
-    market_data = FakeMarketData(
-        active=[
-            ActiveStock(symbol="NVDA", volume=300, trade_count=30),
-            ActiveStock(symbol="SPAC/WS", volume=200, trade_count=20),
-            ActiveStock(symbol="F", volume=100, trade_count=10),
+def _screener_data() -> FakeMarketData:
+    """Most active list mixing eligible stocks with every kind of ineligible one."""
+    market_data = healthy_market_data("NVDA", "F", "PENNY", "SOXL", "GONE", "NOBAR")
+    market_data.active = tuple(
+        ActiveStock(symbol=s, volume=v, trade_count=v // 10)
+        for s, v in [
+            ("PENNY", 900),
+            ("NVDA", 800),
+            ("SPAC/WS", 700),
+            ("SOXL", 600),
+            ("GONE", 500),
+            ("NOBAR", 400),
+            ("F", 300),
         ]
     )
-    result = _tools(market_data).get_most_active(10)
+    market_data.bars["PENNY"] = make_bars("PENNY", closes=("1.20", "1.10"))
+    market_data.bars["F"] = make_bars("F", closes=("11", "12"))
+    del market_data.bars["NOBAR"]
+    market_data.assets["SOXL"] = make_asset(
+        "SOXL", exchange="ARCA", name="Direxion Daily Semiconductor Bull 3X ETF"
+    )
+    del market_data.assets["GONE"]
+    return market_data
+
+
+def test_get_most_active_returns_only_eligible_stocks() -> None:
+    result = _tools(_screener_data()).get_most_active(10)
     assert [s["symbol"] for s in result["stocks"]] == ["NVDA", "F"]
-    assert result["stocks"][0] == {"symbol": "NVDA", "volume": 300, "trade_count": 30}
+    assert result["stocks"][1] == {
+        "symbol": "F",
+        "name": "F Inc.",
+        "exchange": "NASDAQ",
+        "last_close": "12",
+        "volume_today": 300,
+        "trade_count_today": 30,
+    }
+    # PENNY (price), SPAC/WS (symbol), SOXL (fund), GONE (no asset), NOBAR (no price)
+    assert result["screened_out"] == 5
+    assert "not a fund, ETF, or leveraged product" in result["filter"]
+
+
+def test_get_most_active_screens_a_larger_pool_and_stops_at_the_limit() -> None:
+    market_data = _screener_data()
+    result = _tools(market_data).get_most_active(1)
+    assert [s["symbol"] for s in result["stocks"]] == ["NVDA"]
+    assert ("most_active", ("3",)) in market_data.calls  # pool = limit x 3
+
+
+def test_get_most_active_caps_asset_lookups(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("trading_agent.mcp_server.tools.MAX_ASSET_LOOKUPS", 1)
+    market_data = _screener_data()
+    result = _tools(market_data).get_most_active(10)
+    assert len([c for c in market_data.calls if c[0] == "asset"]) == 1
+    assert [s["symbol"] for s in result["stocks"]] == ["NVDA"]
+
+
+def test_get_most_active_with_empty_screener() -> None:
+    result = _tools(FakeMarketData()).get_most_active(5)
+    assert result["stocks"] == []
+    assert result["screened_out"] == 0
 
 
 def test_research_snapshot_summarises_and_reports_rejections() -> None:

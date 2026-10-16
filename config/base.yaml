@@ -27,6 +27,9 @@ risk:
   allowed_exchanges: [NYSE, NASDAQ]
   max_price_deviation_pct: 2
   max_data_age_seconds: 300
+  max_spread_pct: 0.5            # bid/ask spread as % of mid
+  exclude_funds: true           # no funds, ETFs/ETNs, leveraged or inverse products
+  volume_lookback_days: 20      # trading days averaged for min_avg_daily_volume
 
 # To switch vendors, change this block only. Example for Claude:
 #   provider: anthropic, model: claude-sonnet-5-5, fallback_model: claude-haiku-5-5

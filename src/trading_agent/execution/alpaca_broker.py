@@ -1,18 +1,24 @@
 """Alpaca adapter implementing `BrokerPort`.
 
-Phase 0 is read-only: account and market clock. Order placement arrives in Phase 5 and
-will only ever be called by the orchestration layer *after* the risk engine approves.
+Read-only so far: account, market clock, positions, and today's order count. Order placement
+arrives in Phase 5 and will only ever be called after the risk engine approves.
 """
 
 from __future__ import annotations
 
+from datetime import datetime
 from decimal import Decimal
 from enum import Enum
 from typing import Any
 
 from alpaca.trading.client import TradingClient
+from alpaca.trading.enums import OrderSide, QueryOrderStatus
+from alpaca.trading.requests import GetOrdersRequest
 
-from trading_agent.domain.models import AccountSnapshot, MarketClock
+from trading_agent.domain.models import AccountSnapshot, MarketClock, Position
+
+# Alpaca returns at most 500 orders per request; far above one trade a day.
+MAX_ORDERS_PER_QUERY = 500
 
 
 class BrokerError(RuntimeError):
@@ -85,3 +91,31 @@ class AlpacaBroker:
             next_open=clock.next_open,
             next_close=clock.next_close,
         )
+
+    def get_positions(self) -> tuple[Position, ...]:
+        try:
+            positions = self._client.get_all_positions()
+        except Exception as exc:
+            raise BrokerError(f"could not fetch positions: {type(exc).__name__}: {exc}") from exc
+        return tuple(
+            Position(
+                symbol=str(position.symbol),
+                quantity=_to_decimal(position.qty),
+                market_value=_to_decimal(position.market_value),
+                avg_entry_price=_to_decimal(position.avg_entry_price),
+            )
+            for position in positions
+        )
+
+    def count_buy_orders_since(self, since: datetime) -> int:
+        request = GetOrdersRequest(
+            status=QueryOrderStatus.ALL,
+            side=OrderSide.BUY,
+            after=since,
+            limit=MAX_ORDERS_PER_QUERY,
+        )
+        try:
+            orders = self._client.get_orders(filter=request)
+        except Exception as exc:
+            raise BrokerError(f"could not fetch orders: {type(exc).__name__}: {exc}") from exc
+        return len(orders)

@@ -15,8 +15,8 @@ risk engine, executes on a broker, and reports the result against the S&P 500.
 | 1 | Market data and news: quotes, daily bars, assets, news, freshness rules | Done |
 | 2 | MCP server: 7 read-only research tools, input bounds, call budget, audit log | Done |
 | 3 | Analyst agent: tool-calling research over MCP, evidence-verified proposals | Done |
-| 4 | Risk engine | Next |
-| 5 | Order execution (paper) | Planned |
+| 4 | Risk engine: 15 code-enforced checks, cash-only sizing, eligible-only candidates | Done |
+| 5 | Order execution (paper) | Next |
 | 6 | PostgreSQL audit trail | Planned |
 | 7 | Orchestration and scheduling | Planned |
 | 8 | Daily report | Planned |
@@ -43,14 +43,17 @@ risk engine, executes on a broker, and reports the result against the S&P 500.
 ```
 
 Key rules (see [ADR 0001](docs/adr/0001-architecture.md), [ADR 0002](docs/adr/0002-market-data.md),
-[ADR 0003](docs/adr/0003-mcp-tools.md), and [ADR 0004](docs/adr/0004-analyst-agent.md)):
+[ADR 0003](docs/adr/0003-mcp-tools.md), [ADR 0004](docs/adr/0004-analyst-agent.md),
+and [ADR 0005](docs/adr/0005-risk-engine.md)):
 - The AI has read-only tools; it can never place an order directly. Tool inputs are
   validated and bounded, and each session has a call budget.
 - Every model call goes through the LLM gateway (pinned model, fallback, token caps, logs).
 - The analyst's proposal is checked by code: every evidence item must cite a real tool call,
   and its price must match what the tools returned. Anything else means no trade.
 - Config is versioned YAML; secrets come only from the environment and are redacted.
-- Any failed or erroring check means "no trade".
+- Any failed or erroring check means "no trade". The risk engine runs 15 checks with its
+  own fresh data and sizes positions from cash only (no margin); an approval cannot exist
+  without an order plan.
 - Market data must pass quality and freshness rules; a symbol with bad data is rejected.
 
 ## Quick start
@@ -95,6 +98,7 @@ Ready
 | `make docker-healthcheck` | Build the container and run the health check inside it |
 | `uv run trading-agent market-data AAPL MSFT` | Quotes, daily bars, and news for symbols (`--fresh` enforces quote freshness, `--json` for machines) |
 | `uv run trading-agent analyze` | Run the analyst: research and propose one trade or none (uses LLM tokens, never trades) |
+| `uv run trading-agent risk-check AAPL --price 230` | Run every risk rule on a hypothetical buy with live data (never trades) |
 | `uv run trading-agent mcp-server` | Serve the read-only research tools over MCP (stdio) |
 | `uv run trading-agent show-config` | Print the effective config (never secrets) |
 
@@ -111,7 +115,8 @@ src/trading_agent/
   data/                  market data + news adapters, quality/freshness rules, collector
   mcp_server/            read-only research tools + MCP server (stdio)
   agents/                analyst agent: prompts, tool-calling loop, evidence checks
-  risk/ storage/ orchestration/ reporting/   (upcoming phases)
+  risk/                  eligibility rules, risk engine, position sizing
+  storage/ orchestration/ reporting/   (upcoming phases)
   bootstrap.py           composition root
   health.py              pre-flight checks
   cli.py                 `trading-agent` command

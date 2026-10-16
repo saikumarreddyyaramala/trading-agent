@@ -7,7 +7,7 @@ from zoneinfo import ZoneInfo
 
 from trading_agent.settings.models import AppConfig
 
-PROMPT_VERSION = "analyst-2026-10-16.1"
+PROMPT_VERSION = "analyst-2026-10-16.2"
 
 _SYSTEM = """\
 You are the research analyst of an automated US stock trading system.
@@ -20,8 +20,10 @@ What a trade means here:
   {force_close} {timezone}. There is no shorting, no options, no leverage.
 - You do not size the position or set orders. A separate, code-enforced risk engine decides
   whether the trade happens and how big it is. You only propose.
-- Candidates must be listed on {exchanges}, trade at or above ${min_price} per share, and
-  average at least {min_volume:,} shares a day. Prefer liquid names with tight spreads.
+- Candidates must be operating companies listed on {exchanges}, trade at or above
+  ${min_price} per share, and average at least {min_volume:,} shares a day. Funds, ETFs,
+  ETNs, and leveraged or inverse products are not allowed. Prefer liquid names with
+  tight spreads.
 
 How to research:
 - Use the tools. Do not rely on memory for prices, news, or events; your knowledge is stale.

@@ -69,6 +69,12 @@ class RiskConfig(_Strict):
     allowed_exchanges: tuple[str, ...] = ("NYSE", "NASDAQ")
     max_price_deviation_pct: Decimal = Field(default=Decimal("2"), gt=0)
     max_data_age_seconds: int = Field(default=300, gt=0)
+    # Bid/ask spread as % of mid; wide spreads make intraday round trips expensive.
+    max_spread_pct: Decimal = Field(default=Decimal("0.5"), gt=0)
+    # Exclude funds, ETFs/ETNs, and leveraged or inverse products.
+    exclude_funds: bool = True
+    # Trading days averaged for the liquidity rule.
+    volume_lookback_days: int = Field(default=20, ge=5, le=120)
 
 
 class LLMConfig(_Strict):

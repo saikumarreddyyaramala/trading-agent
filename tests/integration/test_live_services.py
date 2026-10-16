@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 import sys
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from pathlib import Path
 
 import anyio
@@ -18,7 +19,7 @@ from mcp_types import CallToolResult
 
 from trading_agent.bootstrap import Container
 from trading_agent.data.quality import bar_issues
-from trading_agent.domain.models import ChatMessage, LLMRequest
+from trading_agent.domain.models import ChatMessage, Evidence, LLMRequest, TradeProposal
 from trading_agent.mcp_server import ALLOWED_TOOLS
 from trading_agent.settings import Secrets, load_config
 from trading_agent.settings.secrets import LLM_SECRET_FIELDS
@@ -114,6 +115,36 @@ def test_mcp_server_over_stdio() -> None:
     assert quote.is_error is False
     assert quote.structured_content is not None
     assert quote.structured_content["symbol"] == "SPY"
+
+
+def test_broker_positions_and_orders_are_readable() -> None:
+    broker = _require("alpaca_api_key", "alpaca_secret_key").build_broker()
+    assert isinstance(broker.get_positions(), tuple)
+    assert broker.count_buy_orders_since(datetime.now(UTC) - timedelta(days=1)) >= 0
+
+
+def test_risk_engine_with_live_data() -> None:
+    """Every rule runs against real data. Approval depends on market hours, so only the
+    record is asserted; ETFs must always be rejected."""
+    container = _require("alpaca_api_key", "alpaca_secret_key")
+    engine = container.build_risk_engine()
+    quote = container.build_market_data().get_latest_quotes(["SOXL"])["SOXL"]
+    proposal = TradeProposal(
+        decision="buy",
+        symbol="SOXL",
+        thesis="integration test",
+        reference_price=quote.ask_price if quote.ask_price > 0 else Decimal("1"),
+        confidence="low",
+        evidence=(
+            Evidence(claim="x", source_call_id="t"),
+            Evidence(claim="y", source_call_id="t"),
+        ),
+        risks=("test",),
+    )
+    decision = engine.evaluate(proposal)
+    assert not decision.approved
+    assert "Asset" in [c.name for c in decision.failed_checks]
+    assert len(decision.checks) == 15
 
 
 @pytest.mark.skipif(os.environ.get("CI") == "true", reason="never spend LLM tokens in CI")

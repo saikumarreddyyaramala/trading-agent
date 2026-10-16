@@ -11,6 +11,7 @@ from trading_agent.data import AlpacaMarketData, AlpacaNews, MarketDataCollector
 from trading_agent.execution import AlpacaBroker
 from trading_agent.llm import LLMGateway
 from trading_agent.mcp_server import ResearchTools
+from trading_agent.risk import RiskEngine
 from trading_agent.settings import ConfigError, load_config
 
 
@@ -106,3 +107,16 @@ def test_analyst_needs_data_and_llm_keys(config_dir: Path, missing: str) -> None
     )
     with pytest.raises(ConfigError, match=missing.upper()):
         container.build_analyst()
+
+
+def test_builds_risk_engine(config_dir: Path) -> None:
+    container = Container(config=load_config("paper", config_dir), secrets=make_secrets())
+    assert isinstance(container.build_risk_engine(), RiskEngine)
+
+
+def test_risk_engine_needs_broker_keys(config_dir: Path) -> None:
+    container = Container(
+        config=load_config("paper", config_dir), secrets=make_secrets(alpaca_secret_key=None)
+    )
+    with pytest.raises(ConfigError, match="ALPACA_SECRET_KEY"):
+        container.build_risk_engine()

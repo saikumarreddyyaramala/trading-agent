@@ -120,7 +120,8 @@ def build_server(tools: ResearchTools) -> MCPServer:
             int, Field(ge=1, le=MAX_MOST_ACTIVE, description="How many stocks to return")
         ] = 20,
     ) -> dict[str, Any]:
-        """Today's most traded US stocks by share volume. Useful for finding liquid
+        """Today's most traded US stocks by share volume, screened to ones the system may
+        trade (allowed exchange, minimum price, no funds or ETFs). A starting list of liquid
         candidates; it says nothing about whether a stock is a good trade."""
         return _call(lambda: tools.get_most_active(limit))
 

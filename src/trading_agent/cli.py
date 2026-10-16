@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -14,7 +15,7 @@ from trading_agent import __version__
 from trading_agent.agents.analyst import AnalystResult
 from trading_agent.bootstrap import Container
 from trading_agent.data.errors import MarketDataError
-from trading_agent.domain.models import SymbolData
+from trading_agent.domain.models import Evidence, RiskDecision, SymbolData, TradeProposal
 from trading_agent.health import CheckStatus, format_age, overall_ok, run_healthchecks
 from trading_agent.mcp_server.server import build_server
 from trading_agent.observability.logging import configure_logging
@@ -237,6 +238,66 @@ def analyze(
     else:
         _print_analysis(result)
     raise typer.Exit(code=1 if result.status == "failed" else 0)
+
+
+def _print_risk(decision: RiskDecision) -> None:
+    for check in decision.checks:
+        status = CheckStatus.PASS if check.passed else CheckStatus.FAIL
+        typer.secho(f"{status.value:<5}", fg=_COLORS[status], nl=False)
+        typer.echo(f" {check.name:<18} {check.detail}")
+    plan = decision.plan
+    if plan is not None:
+        typer.secho("\nAPPROVED", fg=typer.colors.GREEN, bold=True)
+        typer.echo(
+            f"Buy {plan.quantity} {plan.symbol} (~${plan.notional_usd}), "
+            f"limit ${plan.limit_price}, stop ${plan.stop_loss_price}, "
+            f"target ${plan.take_profit_price}"
+        )
+    else:
+        typer.secho("\nREJECTED", fg=typer.colors.RED, bold=True)
+    typer.echo("No order was placed. Execution arrives in Phase 5.")
+
+
+@app.command("risk-check")
+def risk_check(
+    symbol: Annotated[str, typer.Argument(help="Ticker to check, e.g. AAPL.")],
+    price: Annotated[
+        str, typer.Option("--price", help="Reference price, as an analyst would give.")
+    ],
+    env: EnvOption = None,
+    config_dir: ConfigDirOption = None,
+    as_json: Annotated[bool, typer.Option("--json", help="Machine-readable output.")] = False,
+) -> None:
+    """Run every risk rule on a hypothetical buy, with live data. Never places an order."""
+    container = _container(env, config_dir)
+    try:
+        reference = Decimal(price)
+        proposal = TradeProposal(
+            decision="buy",
+            symbol=symbol,
+            thesis="Manual risk check from the command line.",
+            reference_price=reference,
+            confidence="low",
+            evidence=(
+                Evidence(claim="Manual check", source_call_id="cli"),
+                Evidence(claim="Manual check", source_call_id="cli"),
+            ),
+            risks=("Manual check",),
+        )
+        engine = container.build_risk_engine()
+    except (InvalidOperation, ValueError) as exc:
+        typer.secho(f"Error: invalid input: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=2) from exc
+    except ConfigError as exc:
+        typer.secho(f"Configuration error: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=2) from exc
+
+    decision = engine.evaluate(proposal)
+    if as_json:
+        typer.echo(decision.model_dump_json(indent=2))
+    else:
+        _print_risk(decision)
+    raise typer.Exit(code=0 if decision.approved else 1)
 
 
 @app.command("mcp-server")
