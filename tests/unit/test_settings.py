@@ -159,6 +159,17 @@ def test_invalid_execution_settings_are_rejected(override: dict[str, object]) ->
         AppConfig.model_validate({"execution": override})
 
 
+def test_storage_is_optional_for_paper_and_required_for_live(config_dir: Path) -> None:
+    assert load_config("paper", config_dir).storage.required is False
+    assert load_config("live", config_dir).storage.required is True
+
+
+def test_live_without_required_storage_is_rejected(config_dir: Path) -> None:
+    _write(config_dir / "live.yaml", {"broker": {"paper": False}, "storage": {"required": False}})
+    with pytest.raises(ConfigError, match=r"requires storage\.required = true"):
+        load_config("live", config_dir)
+
+
 def test_repo_config_tool_budget(config_dir: Path) -> None:
     assert load_config("paper", config_dir).tools.max_calls_per_session == 100
 

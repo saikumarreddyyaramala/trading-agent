@@ -107,6 +107,10 @@ class OrderExecutionPort(Protocol):
 
     def get_open_orders(self, symbol: str | None = None) -> tuple[BrokerOrder, ...]: ...
 
+    def get_orders_since(self, since: datetime) -> tuple[BrokerOrder, ...]:
+        """Every order submitted at or after `since`, in any status (for reconciliation)."""
+        ...
+
     def cancel_order(self, order_id: str) -> None: ...
 
     def close_position(self, symbol: str) -> BrokerOrder:

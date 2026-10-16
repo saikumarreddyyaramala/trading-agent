@@ -5,3 +5,7 @@ environment: live
 
 broker:
   paper: false
+
+# Real money is never traded without an audit record.
+storage:
+  required: true

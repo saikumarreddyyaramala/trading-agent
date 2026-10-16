@@ -39,6 +39,8 @@ class Secrets(BaseSettings):
     alpaca_secret_key: SecretStr | None = None
     openai_api_key: SecretStr | None = None
     anthropic_api_key: SecretStr | None = None
+    # Audit database, e.g. postgresql://user:pass@host:5432/db or sqlite:///data/audit.db
+    database_url: SecretStr | None = None
     live_trading_confirmed: bool = False
 
     def require(self, name: str) -> str:

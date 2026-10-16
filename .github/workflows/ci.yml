@@ -16,6 +16,19 @@ jobs:
   quality:
     name: Lint, types, tests
     runs-on: ubuntu-latest
+    services:
+      # Real PostgreSQL for the audit store and migration tests.
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: trading
+          POSTGRES_PASSWORD: trading
+          POSTGRES_DB: trading
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U trading -d trading"
+          --health-interval 5s --health-timeout 3s --health-retries 10
     steps:
       - uses: actions/checkout@v4
 
@@ -34,7 +47,9 @@ jobs:
       - name: Type check
         run: uv run mypy
 
-      - name: Unit tests (no network, no secrets)
+      - name: Unit tests (no network, no secrets; storage also on PostgreSQL)
+        env:
+          TEST_DATABASE_URL: postgresql://trading:trading@localhost:5432/trading
         run: uv run pytest --cov --cov-report=term-missing --cov-fail-under=90
 
   secrets-scan:

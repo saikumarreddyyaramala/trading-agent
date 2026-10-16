@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import json
 import uuid
-from datetime import datetime
+from collections.abc import Callable
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Annotated, Any
@@ -27,6 +28,13 @@ from trading_agent.mcp_server.server import build_server
 from trading_agent.observability.logging import configure_logging
 from trading_agent.settings.loader import ConfigError, load_config
 from trading_agent.settings.secrets import Secrets
+from trading_agent.storage.database import (
+    current_revision,
+    head_revision,
+    make_engine,
+    upgrade,
+)
+from trading_agent.storage.store import AuditError, AuditRecorder, AuditStore
 
 app = typer.Typer(
     help="Enterprise-style AI trading agent. Paper trading by default.",
@@ -41,12 +49,37 @@ ConfigDirOption = Annotated[
     Path | None, typer.Option("--config-dir", help="Folder with base.yaml and <env>.yaml.")
 ]
 
+db_app = typer.Typer(help="Audit database: migrations and status.", no_args_is_help=True)
+app.add_typer(db_app, name="db")
+
 _COLORS = {
     CheckStatus.PASS: typer.colors.GREEN,
     CheckStatus.WARN: typer.colors.YELLOW,
     CheckStatus.FAIL: typer.colors.RED,
     CheckStatus.SKIP: typer.colors.BRIGHT_BLACK,
 }
+
+
+def _engine_factory(container: Container) -> Callable[[], Any] | None:
+    url = container.database_url()
+    return None if url is None else (lambda: make_engine(url))
+
+
+def _recorder(container: Container) -> AuditRecorder:
+    try:
+        return container.build_recorder()
+    except ConfigError as exc:
+        typer.secho(f"Audit store unavailable: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=2) from exc
+
+
+def _audit(recorder: AuditRecorder, what: str, fn: Callable[[AuditStore], None]) -> bool:
+    """Write to the audit store; a required write that fails ends the command."""
+    try:
+        return recorder.write(what, fn)
+    except AuditError as exc:
+        typer.secho(f"Audit write failed ({what}): {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1) from exc
 
 
 def _container(env: str | None, config_dir: Path | None) -> Container:
@@ -74,6 +107,7 @@ def healthcheck(
         market_data_factory=container.build_market_data,
         news_factory=container.build_news,
         llm_factory=None if skip_llm else container.build_llm_gateway,
+        engine_factory=_engine_factory(container),
     )
     ok = overall_ok(results)
 
@@ -231,6 +265,7 @@ def analyze(
     Calls the LLM (costs tokens). Never places an order.
     """
     container = _container(env, config_dir)
+    recorder = _recorder(container)
     try:
         agent = container.build_analyst()
     except ConfigError as exc:
@@ -238,6 +273,13 @@ def analyze(
         raise typer.Exit(code=2) from exc
 
     result = anyio.run(agent.run)
+
+    def record(store: AuditStore) -> None:
+        store.start_run(result.run_id, "analyze")
+        store.record_analysis(result)
+        store.finish_run(result.run_id, result.status, result.reason)
+
+    _audit(recorder, "analysis", record)
 
     if as_json:
         typer.echo(result.model_dump_json(indent=2))
@@ -286,7 +328,16 @@ def risk_check(
         typer.secho(f"Configuration error: {exc}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=2) from exc
 
+    recorder = _recorder(container)
     decision = engine.evaluate(proposal)
+    run_id = f"check-{uuid.uuid4().hex[:10]}"
+
+    def record(store: AuditStore) -> None:
+        store.start_run(run_id, "risk_check")
+        store.record_risk_decision(run_id, decision)
+        store.finish_run(run_id, "approved" if decision.approved else "rejected", proposal.thesis)
+
+    _audit(recorder, "risk decision", record)
     if as_json:
         typer.echo(decision.model_dump_json(indent=2))
     else:
@@ -372,13 +423,30 @@ def buy(
         typer.secho(f"Error: invalid input: {exc}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=2) from exc
 
+    recorder = _recorder(container)
+    run_id = f"manual-{uuid.uuid4().hex[:10]}"
     decision = engine.evaluate(proposal)
+
+    def record_decision(store: AuditStore) -> None:
+        store.start_run(run_id, "manual_buy")
+        store.record_risk_decision(run_id, decision)
+
+    # When the audit store is required, no record means no trade.
+    _audit(recorder, "risk decision", record_decision)
     _print_risk(decision)
     if not decision.approved:
+        _audit(recorder, "run result", lambda s: s.finish_run(run_id, "rejected", "risk rejected"))
         raise typer.Exit(code=1)
     typer.echo("")
-    result = executor.enter(decision, f"manual-{uuid.uuid4().hex[:10]}")
+    result = executor.enter(decision, run_id)
     _print_entry(result)
+
+    def record_entry(store: AuditStore) -> None:
+        orders = [o for o in (result.entry_order, result.stop_order) if o is not None]
+        store.record_orders(run_id, orders)
+        store.finish_run(run_id, result.status, result.reason)
+
+    _audit(recorder, "orders", record_entry)
     raise typer.Exit(code=0 if result.status == "entered" else 1)
 
 
@@ -386,8 +454,18 @@ def buy(
 def manage(env: EnvOption = None, config_dir: ConfigDirOption = None) -> None:
     """One exit-management pass: force-close, take profit, and keep a stop on every position."""
     container = _container(env, config_dir)
+    recorder = _recorder(container)
     results = _executor_or_exit(container).manage()
     _print_manage(results)
+    # Record only passes that changed something; "hold" every minute would be noise.
+    changes = [r for r in results if r.action not in ("flat", "hold")]
+
+    def record(store: AuditStore) -> None:
+        for result in changes:
+            store.record_position_event(None, result)
+
+    if changes:
+        _audit(recorder, "position events", record)
     raise typer.Exit(code=1 if any(r.action == "error" for r in results) else 0)
 
 
@@ -400,8 +478,10 @@ def flatten(
         typer.secho("Refusing without --confirm.", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=2)
     container = _container(env, config_dir)
+    recorder = _recorder(container)
     result = _executor_or_exit(container).flatten()
     _print_manage((result,))
+    _audit(recorder, "flatten", lambda s: s.record_position_event(None, result))
     raise typer.Exit(code=1 if result.action == "error" else 0)
 
 
@@ -416,6 +496,90 @@ def mcp_server(env: EnvOption = None, config_dir: ConfigDirOption = None) -> Non
         raise typer.Exit(code=2) from exc
     # stdout is the protocol channel from here on; logs already go to stderr.
     build_server(tools).run("stdio")
+
+
+def _database_or_exit(container: Container) -> str:
+    url = container.database_url()
+    if url is None:
+        typer.secho("DATABASE_URL is not set.", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=2)
+    return url
+
+
+@db_app.command("upgrade")
+def db_upgrade(env: EnvOption = None, config_dir: ConfigDirOption = None) -> None:
+    """Create or migrate the audit database schema to the latest version."""
+    container = _container(env, config_dir)
+    engine = make_engine(_database_or_exit(container))
+    upgrade(engine)
+    typer.echo(f"Audit database ({engine.dialect.name}) is at schema {current_revision(engine)}.")
+
+
+@db_app.command("status")
+def db_status(env: EnvOption = None, config_dir: ConfigDirOption = None) -> None:
+    """Show the audit database's schema version."""
+    container = _container(env, config_dir)
+    engine = make_engine(_database_or_exit(container))
+    current, head = current_revision(engine), head_revision()
+    state = "up to date" if current == head else "needs `trading-agent db upgrade`"
+    typer.echo(f"{engine.dialect.name}: schema {current or 'none'}, latest {head} ({state})")
+    raise typer.Exit(code=0 if current == head else 1)
+
+
+def _store_or_exit(container: Container) -> AuditStore:
+    _database_or_exit(container)
+    return _recorder(container).store
+
+
+@app.command()
+def runs(
+    limit: Annotated[int, typer.Option("--limit", min=1, max=500)] = 20,
+    env: EnvOption = None,
+    config_dir: ConfigDirOption = None,
+) -> None:
+    """List recent runs from the audit trail."""
+    store = _store_or_exit(_container(env, config_dir))
+    for run in store.list_runs(limit):
+        typer.echo(
+            f"{run.started_at:%Y-%m-%d %H:%M}  {run.run_id:<20} {run.kind:<11} "
+            f"{run.status or 'running':<18} {run.summary or ''}"[:160]
+        )
+
+
+@app.command("show-run")
+def show_run(
+    run_id: Annotated[str, typer.Argument(help="Run id from `trading-agent runs`.")],
+    env: EnvOption = None,
+    config_dir: ConfigDirOption = None,
+) -> None:
+    """Everything recorded for one run: analysis, tool calls, risk checks, orders, events."""
+    store = _store_or_exit(_container(env, config_dir))
+    report = store.get_run(run_id)
+    if report is None:
+        typer.secho(f"No run {run_id}.", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+    typer.echo(json.dumps(report, indent=2, default=str))
+
+
+@app.command("sync-orders")
+def sync_orders(
+    days: Annotated[int, typer.Option("--days", min=1, max=30)] = 1,
+    env: EnvOption = None,
+    config_dir: ConfigDirOption = None,
+) -> None:
+    """Refresh recorded orders from the broker: final statuses, fills, and exit orders."""
+    container = _container(env, config_dir)
+    _database_or_exit(container)
+    recorder = _recorder(container)
+    try:
+        orders = container.build_order_port().get_orders_since(
+            datetime.now(UTC) - timedelta(days=days)
+        )
+    except Exception as exc:
+        typer.secho(f"Could not fetch orders: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1) from exc
+    _audit(recorder, "orders", lambda s: s.record_orders(None, orders))
+    typer.echo(f"Synced {len(orders)} order(s) from the last {days} day(s).")
 
 
 @app.command("show-config")

@@ -8,6 +8,7 @@ placed and managed by the executor.
 
 from __future__ import annotations
 
+from datetime import datetime
 from decimal import Decimal
 from enum import Enum
 from typing import Any
@@ -115,6 +116,14 @@ class AlpacaOrderExecutor:
             orders = self._client.get_orders(filter=request)
         except Exception as exc:
             raise BrokerError(f"could not fetch open orders: {type(exc).__name__}: {exc}") from exc
+        return tuple(to_broker_order(order) for order in orders)
+
+    def get_orders_since(self, since: datetime) -> tuple[BrokerOrder, ...]:
+        request = GetOrdersRequest(status=QueryOrderStatus.ALL, after=since, limit=500)
+        try:
+            orders = self._client.get_orders(filter=request)
+        except Exception as exc:
+            raise BrokerError(f"could not fetch orders: {type(exc).__name__}: {exc}") from exc
         return tuple(to_broker_order(order) for order in orders)
 
     def cancel_order(self, order_id: str) -> None:

@@ -4,6 +4,8 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import sqlalchemy as sa
+from pydantic import SecretStr
 
 from tests.conftest import (
     NOW,
@@ -29,6 +31,7 @@ from trading_agent.llm import LLMGateway
 from trading_agent.settings import load_config
 from trading_agent.settings.models import AppConfig
 from trading_agent.settings.secrets import Secrets
+from trading_agent.storage.database import make_engine, upgrade
 
 
 def _by_name(results: list[CheckResult]) -> dict[str, CheckResult]:
@@ -47,6 +50,7 @@ def _run(
     market_data: FakeMarketData | None = None,
     news: FakeNews | None = None,
     llm_factory: Any = None,
+    engine_factory: Any = None,
 ) -> list[CheckResult]:
     return run_healthchecks(
         config,
@@ -56,7 +60,14 @@ def _run(
         news_factory=lambda: news or FakeNews([make_article(symbols=(PROBE_SYMBOL,))]),
         llm_factory=llm_factory,
         clock=lambda: NOW,
+        engine_factory=engine_factory,
     )
+
+
+def _migrated_engine() -> sa.Engine:
+    engine = make_engine("sqlite://")
+    upgrade(engine)
+    return engine
 
 
 @pytest.fixture
@@ -142,7 +153,10 @@ def test_live_without_confirmation_fails(config_dir: Path) -> None:
 def test_live_with_confirmation_warns_but_passes(config_dir: Path) -> None:
     live = load_config("live", config_dir)
     results = _run(
-        live, make_secrets(live_trading_confirmed=True), broker=FakeBroker(is_paper=False)
+        live,
+        make_secrets(live_trading_confirmed=True, database_url=SecretStr("sqlite://")),
+        broker=FakeBroker(is_paper=False),
+        engine_factory=_migrated_engine,
     )
     assert _by_name(results)["Trading mode"].status is CheckStatus.WARN
     assert overall_ok(results)
@@ -250,3 +264,55 @@ def test_empty_news_feed_warns(paper: AppConfig) -> None:
 )
 def test_format_age(seconds: float, text: str) -> None:
     assert format_age(seconds) == text
+
+
+# ---------- Audit store ----------
+
+
+def _db_secrets() -> Secrets:
+    return make_secrets(database_url=SecretStr("sqlite://"))
+
+
+def test_audit_store_is_optional_for_paper(paper: AppConfig) -> None:
+    check = _by_name(_run(paper))["Audit store"]
+    assert check.status is CheckStatus.SKIP
+    assert check.detail == "not configured (optional for paper)"
+
+
+def test_required_audit_store_without_url_fails(paper: AppConfig) -> None:
+    required = paper.model_copy(
+        update={"storage": paper.storage.model_copy(update={"required": True})}
+    )
+    results = _run(required)
+    assert _by_name(results)["Audit store"].status is CheckStatus.FAIL
+    assert not overall_ok(results)
+
+
+def test_migrated_audit_store_passes(paper: AppConfig) -> None:
+    check = _by_name(_run(paper, _db_secrets(), engine_factory=_migrated_engine))["Audit store"]
+    assert check.status is CheckStatus.PASS
+    assert check.detail == "sqlite, schema 0001"
+
+
+def test_unmigrated_audit_store_warns_or_fails(paper: AppConfig) -> None:
+    def empty() -> sa.Engine:
+        return make_engine("sqlite://")
+
+    check = _by_name(_run(paper, _db_secrets(), engine_factory=empty))["Audit store"]
+    assert check.status is CheckStatus.WARN
+    assert "run `trading-agent db upgrade`" in check.detail
+
+    required = paper.model_copy(
+        update={"storage": paper.storage.model_copy(update={"required": True})}
+    )
+    check = _by_name(_run(required, _db_secrets(), engine_factory=empty))["Audit store"]
+    assert check.status is CheckStatus.FAIL
+
+
+def test_unreachable_audit_store(paper: AppConfig) -> None:
+    def broken() -> sa.Engine:
+        raise RuntimeError("connection refused")
+
+    check = _by_name(_run(paper, _db_secrets(), engine_factory=broken))["Audit store"]
+    assert check.status is CheckStatus.WARN
+    assert check.detail == "unreachable: connection refused"

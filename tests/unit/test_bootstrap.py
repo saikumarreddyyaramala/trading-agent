@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from pydantic import SecretStr
 
 from tests.conftest import make_secrets
 from trading_agent.agents import AnalystAgent
@@ -14,6 +15,7 @@ from trading_agent.llm import LLMGateway
 from trading_agent.mcp_server import ResearchTools
 from trading_agent.risk import RiskEngine
 from trading_agent.settings import ConfigError, load_config
+from trading_agent.storage.store import NullAuditStore, SqlAuditStore
 
 
 def _use_claude(config_dir: Path) -> None:
@@ -142,3 +144,24 @@ def test_executor_needs_broker_keys(config_dir: Path) -> None:
     )
     with pytest.raises(ConfigError, match="ALPACA_API_KEY"):
         container.build_executor()
+
+
+def test_audit_store_without_url_is_null(config_dir: Path) -> None:
+    container = Container(config=load_config("paper", config_dir), secrets=make_secrets())
+    assert container.database_url() is None
+    assert isinstance(container.build_audit_store(), NullAuditStore)
+    assert container.build_recorder().required is False
+
+
+def test_audit_store_with_url_is_sql(config_dir: Path) -> None:
+    secrets = make_secrets(database_url=SecretStr("sqlite://"))
+    container = Container(config=load_config("paper", config_dir), secrets=secrets)
+    assert isinstance(container.build_audit_store(), SqlAuditStore)
+
+
+def test_required_audit_store_without_url_raises(config_dir: Path) -> None:
+    container = Container(
+        config=load_config("live", config_dir), secrets=make_secrets(live_trading_confirmed=True)
+    )
+    with pytest.raises(ConfigError, match="DATABASE_URL is not set"):
+        container.build_audit_store()

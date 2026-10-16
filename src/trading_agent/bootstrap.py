@@ -12,7 +12,13 @@ from trading_agent.agents.analyst import AnalystAgent
 from trading_agent.data.alpaca_market_data import AlpacaMarketData
 from trading_agent.data.alpaca_news import AlpacaNews
 from trading_agent.data.collector import MarketDataCollector
-from trading_agent.domain.ports import BrokerPort, LLMProviderPort, MarketDataPort, NewsPort
+from trading_agent.domain.ports import (
+    BrokerPort,
+    LLMProviderPort,
+    MarketDataPort,
+    NewsPort,
+    OrderExecutionPort,
+)
 from trading_agent.execution.alpaca_broker import AlpacaBroker
 from trading_agent.execution.alpaca_orders import AlpacaOrderExecutor
 from trading_agent.execution.executor import Executor
@@ -29,6 +35,13 @@ from trading_agent.settings.secrets import (
     LLM_SECRET_FIELDS,
     MARKET_DATA_SECRET_FIELDS,
     Secrets,
+)
+from trading_agent.storage.database import make_engine
+from trading_agent.storage.store import (
+    AuditRecorder,
+    AuditStore,
+    NullAuditStore,
+    SqlAuditStore,
 )
 
 
@@ -105,15 +118,33 @@ class Container:
             live_trading_confirmed=self.secrets.live_trading_confirmed,
         )
 
-    def build_executor(self) -> Executor:
-        """Order execution. Raises `ExecutionDisabledError` for a live configuration."""
+    def build_order_port(self) -> OrderExecutionPort:
         self._require("broker", BROKER_SECRET_FIELDS[self.config.broker.provider])
-        orders = AlpacaOrderExecutor(
+        return AlpacaOrderExecutor(
             self.secrets.require("alpaca_api_key"),
             self.secrets.require("alpaca_secret_key"),
             paper=self.config.broker.paper,
         )
+
+    def build_executor(self) -> Executor:
+        """Order execution. Raises `ExecutionDisabledError` for a live configuration."""
+        orders = self.build_order_port()
         return Executor(orders, self.build_broker(), self.build_market_data(), self.config)
+
+    def database_url(self) -> str | None:
+        value = self.secrets.database_url
+        return value.get_secret_value() if value and value.get_secret_value() else None
+
+    def build_audit_store(self) -> AuditStore:
+        url = self.database_url()
+        if url is None:
+            if self.config.storage.required:
+                raise ConfigError("storage.required is true but DATABASE_URL is not set")
+            return NullAuditStore()
+        return SqlAuditStore(make_engine(url), self.config)
+
+    def build_recorder(self) -> AuditRecorder:
+        return AuditRecorder(self.build_audit_store(), required=self.config.storage.required)
 
     def build_llm_gateway(self) -> LLMGateway:
         llm = self.config.llm

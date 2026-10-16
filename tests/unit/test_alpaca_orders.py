@@ -187,3 +187,15 @@ def test_to_broker_order_handles_missing_numbers() -> None:
     order = to_broker_order(_sdk_order(qty=None, filled_qty=""))
     assert order.quantity == Decimal("0")
     assert order.filled_quantity == Decimal("0")
+
+
+def test_orders_since_queries_all_statuses() -> None:
+    client = _Client()
+    since = datetime(2026, 10, 14, tzinfo=UTC)
+    (order,) = _executor(client).get_orders_since(since)
+    request = client.calls[0][1]
+    assert request.status is QueryOrderStatus.ALL
+    assert request.after is not None
+    assert order.client_order_id == "ta-run1-entry"
+    with pytest.raises(BrokerError, match="could not fetch orders"):
+        _executor(_Client(fail=ConnectionError("down"))).get_orders_since(since)

@@ -17,8 +17,8 @@ risk engine, executes on a broker, and reports the result against the S&P 500.
 | 3 | Analyst agent: tool-calling research over MCP, evidence-verified proposals | Done |
 | 4 | Risk engine: 15 code-enforced checks, cash-only sizing, eligible-only candidates | Done |
 | 5 | Order execution (paper): idempotent entries, broker-side stops, managed exits | Done |
-| 6 | PostgreSQL audit trail | Next |
-| 7 | Orchestration and scheduling | Planned |
+| 6 | Audit trail: runs, analyses, tool calls, risk checks, orders, events (PostgreSQL) | Done |
+| 7 | Orchestration and scheduling | Next |
 | 8 | Daily report | Planned |
 | 9 | Critic agent | Planned |
 | 10 | Evaluation | Planned |
@@ -44,7 +44,8 @@ risk engine, executes on a broker, and reports the result against the S&P 500.
 
 Key rules (see [ADR 0001](docs/adr/0001-architecture.md), [ADR 0002](docs/adr/0002-market-data.md),
 [ADR 0003](docs/adr/0003-mcp-tools.md), [ADR 0004](docs/adr/0004-analyst-agent.md),
-[ADR 0005](docs/adr/0005-risk-engine.md), and [ADR 0006](docs/adr/0006-order-execution.md)):
+[ADR 0005](docs/adr/0005-risk-engine.md), [ADR 0006](docs/adr/0006-order-execution.md),
+and [ADR 0007](docs/adr/0007-audit-trail.md)):
 - The AI has read-only tools; it can never place an order directly. Tool inputs are
   validated and bounded, and each session has a call budget.
 - Every model call goes through the LLM gateway (pinned model, fallback, token caps, logs).
@@ -57,6 +58,8 @@ Key rules (see [ADR 0001](docs/adr/0001-architecture.md), [ADR 0002](docs/adr/00
 - Orders go through a separate write port that agents never receive. Execution is
   paper-only until Phase 11, every entry gets a broker-side stop immediately, and retries
   cannot double-submit.
+- Every run is recorded (analysis, tool calls, risk checks, orders, exits) with a config
+  snapshot. For live trading the audit store is required: no record, no trade.
 - Market data must pass quality and freshness rules; a symbol with bad data is rejected.
 
 ## Quick start
@@ -106,6 +109,10 @@ Ready
 | `uv run trading-agent manage` | One exit pass: force-close, take profit, keep a stop on every position |
 | `uv run trading-agent flatten --confirm` | Emergency: cancel all orders, close all positions |
 | `make test-paper-orders` | Round-trip a real order on the PAPER account (market hours) |
+| `uv run trading-agent db upgrade` | Create or migrate the audit database (`DATABASE_URL`) |
+| `uv run trading-agent runs` | Recent runs from the audit trail |
+| `uv run trading-agent show-run RUN_ID` | Everything recorded for one run (JSON) |
+| `uv run trading-agent sync-orders` | Refresh recorded orders with final statuses and fills |
 | `uv run trading-agent mcp-server` | Serve the read-only research tools over MCP (stdio) |
 | `uv run trading-agent show-config` | Print the effective config (never secrets) |
 
@@ -123,7 +130,8 @@ src/trading_agent/
   mcp_server/            read-only research tools + MCP server (stdio)
   agents/                analyst agent: prompts, tool-calling loop, evidence checks
   risk/                  eligibility rules, risk engine, position sizing
-  storage/ orchestration/ reporting/   (upcoming phases)
+  storage/               audit trail: schema, Alembic migrations, store
+  orchestration/ reporting/   (upcoming phases)
   bootstrap.py           composition root
   health.py              pre-flight checks
   cli.py                 `trading-agent` command
@@ -131,6 +139,19 @@ tests/unit/              fast tests, no network, no keys
 tests/integration/       opt-in tests against real services
 docs/adr/                architecture decision records
 ```
+
+## Audit database
+
+Set `DATABASE_URL` in `.env`, then create the schema:
+
+```bash
+uv run trading-agent db upgrade
+```
+
+- With Docker: `docker compose up db` and `postgresql://trading:trading@localhost:5432/trading`.
+- Without Docker: `sqlite:///data/audit.db` works for local use (PostgreSQL is the production target).
+
+The audit store is optional for paper trading and required for live trading.
 
 ## Research tools over MCP
 

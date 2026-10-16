@@ -222,7 +222,7 @@ def test_instrument_rules(market_data: FakeMarketData, failed: str, detail: str)
 
 
 def test_live_trading_needs_confirmation() -> None:
-    live = {"environment": "live", "broker": {"paper": False}}
+    live = {"environment": "live", "broker": {"paper": False}, "storage": {"required": True}}
     rejected = _evaluate(broker=FakeBroker(is_paper=False), config=live)
     approved = _evaluate(broker=FakeBroker(is_paper=False), config=live, live_confirmed=True)
     assert "Trading mode" in _failed(rejected)

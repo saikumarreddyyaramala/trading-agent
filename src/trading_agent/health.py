@@ -10,6 +10,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
+from typing import Any
 
 from trading_agent.data.quality import quote_issues
 from trading_agent.domain.models import AccountSnapshot, ChatMessage, LLMRequest
@@ -22,6 +23,7 @@ from trading_agent.settings.secrets import (
     MARKET_DATA_SECRET_FIELDS,
     Secrets,
 )
+from trading_agent.storage.database import current_revision, head_revision
 
 # A liquid, always-quoted symbol used to prove the market data feed works.
 PROBE_SYMBOL = "SPY"
@@ -183,6 +185,34 @@ def _check_news(news: NewsPort, *, now: datetime) -> CheckResult:
     return CheckResult("News", CheckStatus.PASS, f"latest article {age} ago ({latest.source})")
 
 
+def _check_storage(
+    config: AppConfig, secrets: Secrets, engine_factory: Callable[[], Any] | None
+) -> CheckResult:
+    name = "Audit store"
+    url = secrets.database_url
+    if url is None or not url.get_secret_value() or engine_factory is None:
+        if config.storage.required:
+            return CheckResult(name, CheckStatus.FAIL, "required but DATABASE_URL is not set")
+        return CheckResult(name, CheckStatus.SKIP, "not configured (optional for paper)")
+    try:
+        engine = engine_factory()
+        revision = current_revision(engine)
+        backend = engine.dialect.name
+    except Exception as exc:
+        status = CheckStatus.FAIL if config.storage.required else CheckStatus.WARN
+        return CheckResult(name, status, f"unreachable: {exc}")
+    head = head_revision()
+    if revision != head:
+        status = CheckStatus.FAIL if config.storage.required else CheckStatus.WARN
+        return CheckResult(
+            name,
+            status,
+            f"{backend} schema at {revision or 'nothing'}, expected {head}: "
+            "run `trading-agent db upgrade`",
+        )
+    return CheckResult(name, CheckStatus.PASS, f"{backend}, schema {revision}")
+
+
 def _check_llm(gateway: LLMGateway) -> CheckResult:
     request = LLMRequest(
         system="You are a health check. Follow the instruction exactly.",
@@ -215,6 +245,7 @@ def run_healthchecks(
     news_factory: Callable[[], NewsPort],
     llm_factory: Callable[[], LLMGateway] | None,
     clock: Callable[[], datetime] | None = None,
+    engine_factory: Callable[[], Any] | None = None,
 ) -> list[CheckResult]:
     now = clock() if clock else datetime.now(UTC)
     skip_llm = llm_factory is None
@@ -251,6 +282,8 @@ def run_healthchecks(
                 _check_market_data(config, market_data, market_open=market_open, now=now)
             )
             results.append(_check_news(news, now=now))
+
+    results.append(_check_storage(config, secrets, engine_factory))
 
     if llm_factory is None:
         results.append(CheckResult("LLM", CheckStatus.SKIP, "skipped by request"))

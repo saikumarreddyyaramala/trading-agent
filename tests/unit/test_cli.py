@@ -6,6 +6,7 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
+import sqlalchemy as sa
 from typer.testing import CliRunner
 
 from tests.conftest import (
@@ -28,6 +29,8 @@ from trading_agent.domain.models import Evidence, LLMUsage, RiskDecision, TradeP
 from trading_agent.execution.executor import Executor
 from trading_agent.risk import RiskEngine
 from trading_agent.settings.models import AppConfig
+from trading_agent.storage import schema
+from trading_agent.storage.database import make_engine, upgrade
 
 runner = CliRunner()
 
@@ -501,3 +504,200 @@ def test_execution_commands_without_keys_exit_2(config_dir: Path) -> None:
     result = runner.invoke(cli.app, ["manage", "--config-dir", str(config_dir)])
     assert result.exit_code == 2
     assert "Execution unavailable" in result.output
+
+
+# ---------- Audit trail ----------
+
+
+@pytest.fixture
+def audit_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> sa.Engine:
+    url = f"sqlite:///{tmp_path / 'audit.db'}"
+    monkeypatch.setenv("DATABASE_URL", url)
+    engine = make_engine(url)
+    upgrade(engine)
+    return engine
+
+
+def _rows(engine: sa.Engine, table: sa.Table) -> list[dict[str, object]]:
+    with engine.connect() as connection:
+        return [dict(r) for r in connection.execute(sa.select(table)).mappings()]
+
+
+def test_db_upgrade_and_status(
+    config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'fresh.db'}")
+    before = runner.invoke(cli.app, ["db", "status", "--config-dir", str(config_dir)])
+    assert before.exit_code == 1
+    assert "needs `trading-agent db upgrade`" in before.output
+
+    result = runner.invoke(cli.app, ["db", "upgrade", "--config-dir", str(config_dir)])
+    assert result.exit_code == 0, result.output
+    assert "Audit database (sqlite) is at schema 0001." in result.output
+
+    after = runner.invoke(cli.app, ["db", "status", "--config-dir", str(config_dir)])
+    assert after.exit_code == 0
+    assert "up to date" in after.output
+
+
+def test_db_commands_need_a_url(config_dir: Path) -> None:
+    for args in (["db", "upgrade"], ["db", "status"], ["runs"], ["show-run", "x"], ["sync-orders"]):
+        result = runner.invoke(cli.app, [*args, "--config-dir", str(config_dir)])
+        assert result.exit_code == 2, args
+        assert "DATABASE_URL is not set" in result.output
+
+
+def test_analyze_is_recorded(
+    config_dir: Path, monkeypatch: pytest.MonkeyPatch, audit_db: sa.Engine
+) -> None:
+    _use_fake_analyst(monkeypatch, _analysis("proposed", BUY))
+    runner.invoke(cli.app, ["analyze", "--config-dir", str(config_dir)])
+    (run,) = _rows(audit_db, schema.runs)
+    assert (run["run_id"], run["kind"], run["status"]) == ("abc123", "analyze", "proposed")
+    (analysis,) = _rows(audit_db, schema.analyses)
+    assert analysis["symbol"] == "AAPL"
+    assert len(_rows(audit_db, schema.tool_calls)) == 1
+
+
+def test_risk_check_is_recorded(
+    config_dir: Path, monkeypatch: pytest.MonkeyPatch, audit_db: sa.Engine
+) -> None:
+    _use_fake_risk(monkeypatch, FakeBroker())
+    runner.invoke(
+        cli.app, ["risk-check", "AAPL", "--price", "100.05", "--config-dir", str(config_dir)]
+    )
+    (run,) = _rows(audit_db, schema.runs)
+    assert run["kind"] == "risk_check"
+    assert run["status"] == "approved"
+    assert run["run_id"].startswith("check-")
+    assert _rows(audit_db, schema.risk_decisions)[0]["approved"] is True
+
+
+def test_buy_records_decision_orders_and_result(
+    config_dir: Path, monkeypatch: pytest.MonkeyPatch, audit_db: sa.Engine
+) -> None:
+    _use_fake_risk(monkeypatch, FakeBroker())
+    _use_fake_executor(monkeypatch, FakeOrders("instant"))
+    result = runner.invoke(
+        cli.app, ["buy", "AAPL", "--price", "100.05", "--confirm", "--config-dir", str(config_dir)]
+    )
+    assert result.exit_code == 0, result.output
+    (run,) = _rows(audit_db, schema.runs)
+    assert (run["kind"], run["status"]) == ("manual_buy", "entered")
+    orders = {o["role"]: o for o in _rows(audit_db, schema.orders)}
+    assert set(orders) == {"entry", "stop"}
+    assert orders["entry"]["run_id"] == run["run_id"]
+    assert orders["entry"]["status"] == "filled"
+
+
+def test_rejected_buy_is_recorded(
+    config_dir: Path, monkeypatch: pytest.MonkeyPatch, audit_db: sa.Engine
+) -> None:
+    _use_fake_risk(monkeypatch, FakeBroker(market_open=False))
+    _use_fake_executor(monkeypatch, FakeOrders())
+    runner.invoke(
+        cli.app, ["buy", "AAPL", "--price", "100.05", "--confirm", "--config-dir", str(config_dir)]
+    )
+    (run,) = _rows(audit_db, schema.runs)
+    assert run["status"] == "rejected"
+    assert _rows(audit_db, schema.orders) == []
+
+
+def test_no_audit_record_means_no_trade(
+    config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (config_dir / "paper.yaml").write_text(
+        "environment: paper\nbroker:\n  paper: true\nstorage:\n  required: true\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'never-migrated.db'}")
+    _use_fake_risk(monkeypatch, FakeBroker())
+    orders = _use_fake_executor(monkeypatch, FakeOrders("instant"))
+    result = runner.invoke(
+        cli.app, ["buy", "AAPL", "--price", "100.05", "--confirm", "--config-dir", str(config_dir)]
+    )
+    assert result.exit_code == 1
+    assert "Audit write failed (risk decision)" in result.output
+    assert orders.log == []  # nothing was traded
+
+
+def test_required_storage_without_url_exits_2(
+    config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (config_dir / "paper.yaml").write_text(
+        "environment: paper\nbroker:\n  paper: true\nstorage:\n  required: true\n",
+        encoding="utf-8",
+    )
+    _use_fake_risk(monkeypatch, FakeBroker())
+    result = runner.invoke(
+        cli.app, ["risk-check", "AAPL", "--price", "100", "--config-dir", str(config_dir)]
+    )
+    assert result.exit_code == 2
+    assert "Audit store unavailable" in result.output
+
+
+def test_manage_records_only_changes(
+    config_dir: Path, monkeypatch: pytest.MonkeyPatch, audit_db: sa.Engine
+) -> None:
+    broker = FakeBroker(positions=(make_position("AAPL", "0.4899", "100"),))
+    _use_fake_executor(monkeypatch, FakeOrders(), broker)
+    runner.invoke(cli.app, ["manage", "--config-dir", str(config_dir)])  # restores the stop
+    runner.invoke(cli.app, ["manage", "--config-dir", str(config_dir)])  # now holds: not recorded
+    (event,) = _rows(audit_db, schema.position_events)
+    assert event["action"] == "stop_restored"
+    assert _rows(audit_db, schema.orders)[0]["role"] == "restore_stop"
+
+
+def test_flatten_is_recorded(
+    config_dir: Path, monkeypatch: pytest.MonkeyPatch, audit_db: sa.Engine
+) -> None:
+    _use_fake_executor(monkeypatch, FakeOrders(), FakeBroker(positions=(make_position("AAPL"),)))
+    runner.invoke(cli.app, ["flatten", "--confirm", "--config-dir", str(config_dir)])
+    (event,) = _rows(audit_db, schema.position_events)
+    assert event["action"] == "flattened"
+
+
+def test_runs_and_show_run(
+    config_dir: Path, monkeypatch: pytest.MonkeyPatch, audit_db: sa.Engine
+) -> None:
+    _use_fake_analyst(monkeypatch, _analysis("proposed", BUY))
+    runner.invoke(cli.app, ["analyze", "--config-dir", str(config_dir)])
+
+    listing = runner.invoke(cli.app, ["runs", "--config-dir", str(config_dir)])
+    assert listing.exit_code == 0
+    assert "abc123" in listing.output
+    assert "analyze" in listing.output
+
+    shown = runner.invoke(cli.app, ["show-run", "abc123", "--config-dir", str(config_dir)])
+    assert shown.exit_code == 0
+    report = json.loads(shown.stdout)
+    assert report["analysis"]["symbol"] == "AAPL"
+    assert report["run"]["kind"] == "analyze"
+
+    missing = runner.invoke(cli.app, ["show-run", "nope", "--config-dir", str(config_dir)])
+    assert missing.exit_code == 1
+
+
+def test_sync_orders(
+    config_dir: Path, monkeypatch: pytest.MonkeyPatch, audit_db: sa.Engine
+) -> None:
+    orders = FakeOrders("instant")
+    orders.submit_limit_buy("AAPL", Decimal("1"), Decimal("100"), "ta-old-entry")
+    monkeypatch.setattr(Container, "build_order_port", lambda self: orders)
+    result = runner.invoke(cli.app, ["sync-orders", "--days", "2", "--config-dir", str(config_dir)])
+    assert result.exit_code == 0, result.output
+    assert "Synced 1 order(s) from the last 2 day(s)." in result.output
+    assert _rows(audit_db, schema.orders)[0]["client_order_id"] == "ta-old-entry"
+
+
+def test_sync_orders_broker_failure(
+    config_dir: Path, monkeypatch: pytest.MonkeyPatch, audit_db: sa.Engine
+) -> None:
+    class _Broken:
+        def get_orders_since(self, since: object) -> None:
+            raise RuntimeError("broker down")
+
+    monkeypatch.setattr(Container, "build_order_port", lambda self: _Broken())
+    result = runner.invoke(cli.app, ["sync-orders", "--config-dir", str(config_dir)])
+    assert result.exit_code == 1
+    assert "Could not fetch orders: broker down" in result.output

@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
 import pytest
+import sqlalchemy as sa
+from alembic import command
 from pydantic import SecretStr
 
 from trading_agent.data.errors import MarketDataError
@@ -31,6 +34,7 @@ from trading_agent.domain.models import (
 )
 from trading_agent.llm.errors import LLMProviderError
 from trading_agent.settings.secrets import Secrets
+from trading_agent.storage.database import alembic_config, make_engine, upgrade
 
 REPO_CONFIG = Path(__file__).resolve().parents[1] / "config"
 
@@ -57,6 +61,7 @@ def _isolated_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         "OPENAI_API_KEY",
         "ANTHROPIC_API_KEY",
         "LIVE_TRADING_CONFIRMED",
+        "DATABASE_URL",
     ):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.chdir(tmp_path)
@@ -434,6 +439,9 @@ class FakeOrders:
             return self._filled(order, order.quantity / 2, status="partially_filled")
         return order
 
+    def get_orders_since(self, since: datetime) -> tuple[BrokerOrder, ...]:
+        return tuple(self.orders.values())
+
     def get_open_orders(self, symbol: str | None = None) -> tuple[BrokerOrder, ...]:
         return tuple(
             o
@@ -463,3 +471,27 @@ class FakeOrders:
 def make_position(symbol: str = "AAPL", quantity: str = "0.4899", avg: str = "100") -> Position:
     qty, price = Decimal(quantity), Decimal(avg)
     return Position(symbol=symbol, quantity=qty, market_value=qty * price, avg_entry_price=price)
+
+
+# ---------- Audit database ----------
+
+
+def _postgres_url() -> str | None:
+    return os.environ.get("TEST_DATABASE_URL") or None
+
+
+@pytest.fixture(params=["sqlite", "postgres"])
+def db_engine(request: pytest.FixtureRequest, tmp_path: Path) -> Iterator[sa.Engine]:
+    """A migrated audit database: SQLite always, PostgreSQL when TEST_DATABASE_URL is set."""
+    if request.param == "sqlite":
+        engine = make_engine(f"sqlite:///{tmp_path / 'audit.db'}")
+    else:
+        url = _postgres_url()
+        if url is None:
+            pytest.skip("set TEST_DATABASE_URL to run against PostgreSQL")
+        engine = make_engine(url)
+        with engine.begin() as connection:  # start from an empty database
+            command.downgrade(alembic_config(connection), "base")
+    upgrade(engine)
+    yield engine
+    engine.dispose()

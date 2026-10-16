@@ -138,6 +138,14 @@ class ExecutionConfig(_Strict):
     cancel_timeout_seconds: int = Field(default=30, ge=5, le=300)
 
 
+class StorageConfig(_Strict):
+    """The audit trail. The database URL is a secret (DATABASE_URL), not config."""
+
+    # True: no audit record means no trade (and a missing database is an error).
+    # Must be true for live trading; optional for paper so local use needs no database.
+    required: bool = False
+
+
 class AppConfig(_Strict):
     environment: Environment = Environment.PAPER
     kill_switch: bool = False
@@ -149,6 +157,7 @@ class AppConfig(_Strict):
     tools: ToolsConfig = ToolsConfig()
     analyst: AnalystConfig = AnalystConfig()
     execution: ExecutionConfig = ExecutionConfig()
+    storage: StorageConfig = StorageConfig()
 
     @model_validator(mode="after")
     def _environment_matches_broker(self) -> AppConfig:
@@ -158,6 +167,8 @@ class AppConfig(_Strict):
             raise ValueError("environment 'paper' requires broker.paper = true")
         if self.environment is Environment.LIVE and self.broker.paper:
             raise ValueError("environment 'live' requires broker.paper = false")
+        if self.environment is Environment.LIVE and not self.storage.required:
+            raise ValueError("environment 'live' requires storage.required = true")
         return self
 
     @property

@@ -57,5 +57,4 @@ real services are opt-in and never run in CI.
   interviewers ask about.
 
 ## Planned decisions
-- 0007: Audit storage schema (Phase 6)
 - 0008: Workflow engine for the daily cycle (Phase 7)

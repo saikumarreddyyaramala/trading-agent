@@ -74,7 +74,7 @@ def _executor(
 
 
 def test_live_configuration_is_refused_outright() -> None:
-    live = {"environment": "live", "broker": {"paper": False}}
+    live = {"environment": "live", "broker": {"paper": False}, "storage": {"required": True}}
     with pytest.raises(ExecutionDisabledError, match="paper-only until Phase 11"):
         _executor(config=live)
 

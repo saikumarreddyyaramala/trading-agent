@@ -1,9 +1,19 @@
-# Local stack. `docker compose up` runs the agent's health check against your .env.
-# PostgreSQL is included now so the stack matches production; the agent starts using it in Phase 6.
+# Local stack: PostgreSQL, a one-shot schema migration, then the agent's health check.
+#   docker compose up            # health check against your .env
+#   docker compose run --rm agent runs
 services:
   agent:
     build: .
     env_file: .env
+    environment:
+      DATABASE_URL: postgresql://trading:trading@db:5432/trading
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  migrate:
+    build: .
+    command: ["db", "upgrade"]
     environment:
       DATABASE_URL: postgresql://trading:trading@db:5432/trading
     depends_on:
