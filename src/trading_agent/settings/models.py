@@ -138,6 +138,18 @@ class ExecutionConfig(_Strict):
     cancel_timeout_seconds: int = Field(default=30, ge=5, le=300)
 
 
+class CriticConfig(_Strict):
+    """A second, independent LLM review of every buy proposal. It can only veto."""
+
+    enabled: bool = True
+    # A different model gives a more independent review. Unset: the analyst's model.
+    model: str | None = None
+    # Chances to fix an answer that is not valid JSON in the expected shape.
+    repair_attempts: int = Field(default=1, ge=0, le=2)
+    # Upper bound on the evidence text shown to the critic.
+    max_evidence_chars: int = Field(default=60_000, ge=5_000, le=200_000)
+
+
 class OrchestrationConfig(_Strict):
     """The daily cycle. Step times come from `schedule`; these tune the loop."""
 
@@ -179,6 +191,7 @@ class AppConfig(_Strict):
     market_data: MarketDataConfig = MarketDataConfig()
     tools: ToolsConfig = ToolsConfig()
     analyst: AnalystConfig = AnalystConfig()
+    critic: CriticConfig = CriticConfig()
     execution: ExecutionConfig = ExecutionConfig()
     storage: StorageConfig = StorageConfig()
     orchestration: OrchestrationConfig = OrchestrationConfig()

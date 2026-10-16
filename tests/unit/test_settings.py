@@ -246,3 +246,16 @@ def test_repo_config_reporting(config_dir: Path) -> None:
 def test_invalid_reporting_settings_are_rejected(override: dict[str, object]) -> None:
     with pytest.raises(ValueError, match="reporting"):
         AppConfig.model_validate({"reporting": override})
+
+
+def test_repo_config_critic(config_dir: Path) -> None:
+    critic = load_config("paper", config_dir).critic
+    assert critic.enabled is True
+    assert critic.model is None
+    assert critic.repair_attempts == 1
+
+
+@pytest.mark.parametrize("override", [{"repair_attempts": 3}, {"max_evidence_chars": 100}])
+def test_invalid_critic_settings_are_rejected(override: dict[str, object]) -> None:
+    with pytest.raises(ValueError, match="critic"):
+        AppConfig.model_validate({"critic": override})

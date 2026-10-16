@@ -11,7 +11,8 @@ import sqlalchemy as sa
 from pydantic import BaseModel, ConfigDict
 
 from trading_agent import __version__
-from trading_agent.agents.analyst import AnalystResult
+from trading_agent.agents.analyst import AnalystResult, ToolCallRecord
+from trading_agent.agents.critic import CriticResult
 from trading_agent.domain.models import BrokerOrder, RiskDecision, TradeProposal
 from trading_agent.execution.executor import ManageResult
 from trading_agent.observability.logging import get_logger
@@ -79,8 +80,16 @@ class AuditStore(Protocol):
         """Orders submitted in [start, end), oldest first."""
         ...
 
+    def record_critique(self, result: CriticResult) -> None: ...
+
+    def get_critique(self, run_id: str) -> dict[str, Any] | None: ...
+
+    def tool_calls(self, run_id: str) -> list[ToolCallRecord]:
+        """The analyst's tool calls for a run, with their outputs, in call order."""
+        ...
+
     def analysis_totals(self, run_id_prefix: str) -> dict[str, int]:
-        """Number of analyses and their token usage, for runs whose id starts with a prefix."""
+        """Analyses and critiques, and their combined token usage, for runs with a prefix."""
         ...
 
 
@@ -125,8 +134,17 @@ class NullAuditStore:
     def orders_between(self, start: datetime, end: datetime) -> list[dict[str, Any]]:
         return []
 
+    def record_critique(self, result: CriticResult) -> None:
+        return None
+
+    def get_critique(self, run_id: str) -> dict[str, Any] | None:
+        return None
+
+    def tool_calls(self, run_id: str) -> list[ToolCallRecord]:
+        return []
+
     def analysis_totals(self, run_id_prefix: str) -> dict[str, int]:
-        return {"analyses": 0, "input_tokens": 0, "output_tokens": 0}
+        return {"analyses": 0, "critiques": 0, "input_tokens": 0, "output_tokens": 0}
 
 
 class SqlAuditStore:
@@ -216,6 +234,7 @@ class SqlAuditStore:
                             "tool": call.tool,
                             "arguments": call.arguments,
                             "is_error": call.is_error,
+                            "result": call.result,
                         }
                         for seq, call in enumerate(result.tool_calls, start=1)
                     ],
@@ -402,6 +421,9 @@ class SqlAuditStore:
                     connection, schema.position_events, schema.position_events.c.id
                 ),
                 "steps": rows(connection, schema.run_steps, schema.run_steps.c.id),
+                "critique": next(
+                    iter(rows(connection, schema.critiques, schema.critiques.c.id)), None
+                ),
             }
 
         return self._read(f"run {run_id}", read)
@@ -420,22 +442,78 @@ class SqlAuditStore:
         return self._read("orders", read)
 
     def analysis_totals(self, run_id_prefix: str) -> dict[str, int]:
-        table = schema.analyses
-
-        def read(connection: sa.Connection) -> dict[str, int]:
+        def totals(connection: sa.Connection, table: sa.Table) -> tuple[int, int, int]:
             query = sa.select(
                 sa.func.count(table.c.id),
                 sa.func.coalesce(sa.func.sum(table.c.input_tokens), 0),
                 sa.func.coalesce(sa.func.sum(table.c.output_tokens), 0),
             ).where(table.c.run_id.startswith(run_id_prefix, autoescape=True))
             count, inputs, outputs = connection.execute(query).one()
+            return int(count), int(inputs), int(outputs)
+
+        def read(connection: sa.Connection) -> dict[str, int]:
+            analyses = totals(connection, schema.analyses)
+            critiques = totals(connection, schema.critiques)
             return {
-                "analyses": int(count),
-                "input_tokens": int(inputs),
-                "output_tokens": int(outputs),
+                "analyses": analyses[0],
+                "critiques": critiques[0],
+                "input_tokens": analyses[1] + critiques[1],
+                "output_tokens": analyses[2] + critiques[2],
             }
 
         return self._read("analysis totals", read)
+
+    def record_critique(self, result: CriticResult) -> None:
+        def write(connection: sa.Connection) -> None:
+            connection.execute(
+                schema.critiques.insert().values(
+                    run_id=result.run_id,
+                    status=result.status,
+                    model_verdict=result.model_verdict,
+                    summary=result.summary,
+                    reasons=list(result.reasons),
+                    concerns=list(result.concerns),
+                    evidence_checks=[c.model_dump(mode="json") for c in result.evidence_checks],
+                    model=result.model,
+                    prompt_version=result.prompt_version,
+                    input_tokens=result.usage.input_tokens,
+                    output_tokens=result.usage.output_tokens,
+                    created_at=result.created_at,
+                )
+            )
+
+        self._write(f"critique for run {result.run_id}", write)
+
+    def get_critique(self, run_id: str) -> dict[str, Any] | None:
+        table = schema.critiques
+
+        def read(connection: sa.Connection) -> dict[str, Any] | None:
+            row = (
+                connection.execute(sa.select(table).where(table.c.run_id == run_id))
+                .mappings()
+                .first()
+            )
+            return None if row is None else dict(row)
+
+        return self._read(f"critique of run {run_id}", read)
+
+    def tool_calls(self, run_id: str) -> list[ToolCallRecord]:
+        table = schema.tool_calls
+
+        def read(connection: sa.Connection) -> list[ToolCallRecord]:
+            query = sa.select(table).where(table.c.run_id == run_id).order_by(table.c.seq)
+            return [
+                ToolCallRecord(
+                    call_id=row["call_id"],
+                    tool=row["tool"],
+                    arguments=row["arguments"],
+                    is_error=row["is_error"],
+                    result=row["result"],
+                )
+                for row in connection.execute(query).mappings()
+            ]
+
+        return self._read(f"tool calls of run {run_id}", read)
 
 
 class AuditRecorder:

@@ -20,8 +20,8 @@ risk engine, executes on a broker, and reports the result against the S&P 500.
 | 6 | Audit trail: runs, analyses, tool calls, risk checks, orders, events (PostgreSQL) | Done |
 | 7 | Daily cycle: scheduled steps, resume after restart, holidays and early closes | Done |
 | 8 | Daily report: P&L vs SPY, performance to date, Markdown/JSON, webhook | Done |
-| 9 | Critic agent | Next |
-| 10 | Evaluation | Planned |
+| 9 | Critic agent: independent review of every buy, veto only, code-enforced | Done |
+| 10 | Evaluation | Next |
 | 11 | Go live ($100) | Planned |
 
 ## Architecture
@@ -29,7 +29,8 @@ risk engine, executes on a broker, and reports the result against the S&P 500.
 ```
             ┌────────────── domain/ports.py (interfaces) ──────────────┐
             │                                                          │
- agents ──► MCP client ──► research tools (read-only)
+ analyst ──► MCP client ──► research tools (read-only)
+ critic  ──► reviews the analyst's proposal and tool outputs (veto only)
    │
    └──────► LLMGateway ──► LLMProviderPort ◄── llm/openai_provider.py (default)
                                              ◄── llm/anthropic_provider.py
@@ -46,12 +47,14 @@ Key rules (see [ADR 0001](docs/adr/0001-architecture.md), [ADR 0002](docs/adr/00
 [ADR 0003](docs/adr/0003-mcp-tools.md), [ADR 0004](docs/adr/0004-analyst-agent.md),
 [ADR 0005](docs/adr/0005-risk-engine.md), [ADR 0006](docs/adr/0006-order-execution.md),
 [ADR 0007](docs/adr/0007-audit-trail.md), [ADR 0008](docs/adr/0008-daily-cycle.md),
-and [ADR 0009](docs/adr/0009-daily-report.md)):
+[ADR 0009](docs/adr/0009-daily-report.md), and [ADR 0010](docs/adr/0010-critic-agent.md)):
 - The AI has read-only tools; it can never place an order directly. Tool inputs are
   validated and bounded, and each session has a call budget.
 - Every model call goes through the LLM gateway (pinned model, fallback, token caps, logs).
 - The analyst's proposal is checked by code: every evidence item must cite a real tool call,
   and its price must match what the tools returned. Anything else means no trade.
+- A second LLM, the critic, reviews every buy against the exact tool outputs. It can only
+  veto; any unsupported claim, invalid answer, or outage also means no trade.
 - Config is versioned YAML; secrets come only from the environment and are redacted.
 - Any failed or erroring check means "no trade". The risk engine runs 15 checks with its
   own fresh data and sizes positions from cash only (no margin); an approval cannot exist
@@ -106,7 +109,8 @@ Ready
 | `make healthcheck` | Pre-flight check with your `.env` |
 | `make docker-healthcheck` | Build the container and run the health check inside it |
 | `uv run trading-agent market-data AAPL MSFT` | Quotes, daily bars, and news for symbols (`--fresh` enforces quote freshness, `--json` for machines) |
-| `uv run trading-agent analyze` | Run the analyst: research and propose one trade or none (uses LLM tokens, never trades) |
+| `uv run trading-agent analyze` | Run the analyst, and the critic on any buy (uses LLM tokens, never trades) |
+| `uv run trading-agent critique RUN_ID` | Re-review a recorded proposal with the critic |
 | `uv run trading-agent risk-check AAPL --price 230` | Run every risk rule on a hypothetical buy with live data (never trades) |
 | `uv run trading-agent buy AAPL --price 230 --confirm` | Risk-check and, if approved, enter on the PAPER account with a stop-loss |
 | `uv run trading-agent manage` | One exit pass: force-close, take profit, keep a stop on every position |
@@ -134,7 +138,7 @@ src/trading_agent/
   execution/             read-only broker adapter, order adapter, executor (paper)
   data/                  market data + news adapters, quality/freshness rules, collector
   mcp_server/            read-only research tools + MCP server (stdio)
-  agents/                analyst agent: prompts, tool-calling loop, evidence checks
+  agents/                analyst (tool-calling research, evidence checks) and critic (veto-only review)
   risk/                  eligibility rules, risk engine, position sizing
   storage/               audit trail: schema, Alembic migrations, store
   orchestration/         the daily cycle: schedule, steps, resume, market calendar
@@ -155,6 +159,7 @@ docs/adr/                architecture decision records
 | --- | --- | --- |
 | preflight | 08:30 | health check; a failure halts new trades for the day |
 | analysis | 08:45 | the analyst researches and proposes one trade or none |
+| critique | after analysis | the critic reviews a buy against the evidence; it can only veto |
 | entry | 09:45 | risk check with fresh data; paper entry with a stop-loss if approved |
 | manage | every minute | take profit, keep the stop in place |
 | close | 15:50 | force-close and verify the account is flat (earlier on half-days) |

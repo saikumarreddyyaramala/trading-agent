@@ -470,3 +470,51 @@ def test_missing_benchmark_bar_for_a_past_trading_day_is_flagged(store: SqlAudit
     assert report.warnings == [
         "no SPY bar for 2026-10-15 (a market holiday, or older than the data window)"
     ]
+
+
+def _vetoed_critique() -> Any:
+    from trading_agent.agents.critic import CriticResult, EvidenceCheck
+
+    return CriticResult(
+        run_id=RUN,
+        status="vetoed",
+        model_verdict="approve",
+        summary="Evidence c2 overstates the spread.",
+        reasons=("evidence 'c2' is unsupported: spread is 0.2%, not 0.02%",),
+        concerns=("Market is falling",),
+        evidence_checks=(
+            EvidenceCheck(source_call_id="c1", supported=True, note="ok"),
+            EvidenceCheck(source_call_id="c2", supported=False, note="spread is 0.2%, not 0.02%"),
+        ),
+        model="judge",
+        prompt_version="critic-p",
+        usage=LLMUsage(input_tokens=4000, output_tokens=400),
+        created_at=_ny(8, 46),
+    )
+
+
+def test_report_shows_the_critics_veto(store: SqlAuditStore) -> None:
+    store.start_run(RUN, "daily")
+    store.record_critique(_vetoed_critique())
+    report = _builder(store).build(DAY)
+    assert report.critic is not None
+    assert report.critic.status == "vetoed"
+    assert report.critic.unsupported == ["c2: spread is 0.2%, not 0.02%"]
+    assert report.llm.critiques == 1
+    markdown = render_markdown(report)
+    for expected in [
+        "## Critic",
+        "**VETOED** by judge, 4,400 tokens. Evidence c2 overstates the spread.",
+        "Unsupported evidence:\n- c2: spread is 0.2%, not 0.02%",
+        "Why it did not pass:\n- evidence 'c2' is unsupported",
+        "Concerns:\n- Market is falling",
+        "1 critiques",
+    ]:
+        assert expected in markdown, expected
+
+
+def test_report_without_a_critique_has_no_critic_section(store: SqlAuditStore) -> None:
+    _record_trading_day(store)
+    report = _builder(store).build(DAY)
+    assert report.critic is None
+    assert "## Critic" not in render_markdown(report)

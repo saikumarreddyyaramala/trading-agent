@@ -6,6 +6,7 @@ Run locally with:  make test-integration
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 import uuid
@@ -20,6 +21,7 @@ import pytest
 from mcp import Client, StdioServerParameters
 from mcp_types import CallToolResult
 
+from trading_agent.agents.analyst import ToolCallRecord
 from trading_agent.bootstrap import Container
 from trading_agent.data.quality import bar_issues
 from trading_agent.domain.models import ChatMessage, Evidence, LLMRequest, TradeProposal
@@ -251,3 +253,45 @@ def test_paper_round_trip() -> None:
         flattened = executor.flatten()
         print(flattened.model_dump_json(indent=2))
     assert flattened.action == "flattened", flattened.detail
+
+
+@pytest.mark.skipif(os.environ.get("CI") == "true", reason="never spend LLM tokens in CI")
+def test_real_critic_catches_a_misquoted_price() -> None:
+    """Real quote, real critic, deliberately false evidence: the critic must veto."""
+    container = _require("alpaca_api_key", "alpaca_secret_key", "openai_api_key")
+    tools = container.build_research_tools()
+    quote = tools.get_quote("SPY")
+    wrong_price = Decimal(quote["ask"]) * 2  # claim twice the real ask
+    calls = [
+        ToolCallRecord(
+            call_id="c1",
+            tool="get_quote",
+            arguments={"symbol": "SPY"},
+            is_error=False,
+            result=json.dumps(quote),
+        ),
+        ToolCallRecord(
+            call_id="c2",
+            tool="market_status",
+            arguments={},
+            is_error=False,
+            result=json.dumps(tools.market_status()),
+        ),
+    ]
+    proposal = TradeProposal(
+        decision="buy",
+        symbol="SPY",
+        thesis="Strong momentum into the close.",
+        reference_price=Decimal(quote["ask"]),
+        confidence="high",
+        evidence=(
+            Evidence(claim=f"SPY's ask is ${wrong_price}", source_call_id="c1"),
+            Evidence(claim="The market is open", source_call_id="c2"),
+        ),
+        risks=("Reversal",),
+    )
+    critic = container.build_critic()
+    assert critic is not None
+    result = critic.review("itest-critic", proposal, calls)
+    print(result.model_dump_json(indent=2))
+    assert result.status != "approved", "a doubled price must never pass review"

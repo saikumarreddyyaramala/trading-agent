@@ -250,3 +250,18 @@ def test_outcome_is_logged() -> None:
     assert fields["status"] == "proposed"
     assert fields["symbol"] == "AAPL"
     assert fields["tool_calls"] == 2
+
+
+def test_tool_outputs_are_kept_for_review() -> None:
+    result, _ = _run([(QUOTE, tool_call("bad", "place_order")), NO_TRADE])
+    quote, unknown = result.tool_calls
+    assert quote.result is not None
+    assert json.loads(quote.result)["symbol"] == "AAPL"
+    assert unknown.is_error is True
+    assert "Unknown tool" in (unknown.result or "")
+
+
+def test_malformed_arguments_keep_their_message() -> None:
+    broken = ToolCall(id="x1", name="get_quote", arguments_json="{oops")
+    result, _ = _run([(broken,), NO_TRADE])
+    assert result.tool_calls[0].result == "arguments must be a JSON object"

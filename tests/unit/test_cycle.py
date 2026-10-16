@@ -13,7 +13,8 @@ import pytest
 import sqlalchemy as sa
 
 from tests.conftest import FakeTime
-from trading_agent.agents.analyst import AnalystResult
+from trading_agent.agents.analyst import AnalystResult, ToolCallRecord
+from trading_agent.agents.critic import CriticResult
 from trading_agent.domain.models import (
     BrokerOrder,
     Evidence,
@@ -279,6 +280,7 @@ def test_trading_day_runs_every_step_on_schedule(tmp_path: Path) -> None:
     assert result.steps == {
         "preflight": "ok",
         "analysis": "proposed",
+        "critique": "disabled",
         "entry": "entered",
         "close": "ok",
         "reconcile": "ok",
@@ -302,6 +304,7 @@ def test_trading_day_is_fully_recorded(tmp_path: Path) -> None:
     assert [s["step"] for s in h.rows(schema.run_steps)] == [
         "preflight",
         "analysis",
+        "critique",
         "entry",
         "close",
         "reconcile",
@@ -708,3 +711,110 @@ def test_finished_report_is_not_repeated_on_resume(tmp_path: Path) -> None:
     calls: list[date] = []
     _rebuild(h, report=lambda day: calls.append(day) or "x").run_day(THURSDAY)
     assert calls == []
+
+
+# ---------- The critique step ----------
+
+
+def _critic_result(status: str) -> CriticResult:
+    return CriticResult(
+        run_id=RUN_ID,
+        status=status,  # type: ignore[arg-type]
+        model_verdict="approve" if status == "approved" else "veto",
+        summary="ok" if status == "approved" else "momentum is fading",
+        reasons=() if status == "approved" else ("the critic vetoed the trade",),
+        concerns=(),
+        evidence_checks=(),
+        model="judge",
+        prompt_version="p",
+        usage=LLMUsage(input_tokens=5, output_tokens=1),
+        created_at=at(8, 46),
+    )
+
+
+def _with_critic(h: Harness, result: CriticResult | Exception | None) -> list[int]:
+    seen: list[int] = []
+
+    def critique(run_id: str, proposal: TradeProposal, calls: list[Any]) -> CriticResult | None:
+        seen.append(len(calls))
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    _rebuild(h, critique=critique)
+    return seen
+
+
+def test_approved_proposal_goes_on_to_the_entry(tmp_path: Path) -> None:
+    h = Harness(tmp_path)
+    _with_critic(h, _critic_result("approved"))
+    result = h.cycle.run_day(THURSDAY)
+    assert result.steps["critique"] == "approved"
+    assert result.status == "traded"
+    assert h.rows(schema.critiques)[0]["status"] == "approved"
+
+
+@pytest.mark.parametrize("status", ["vetoed", "failed"])
+def test_veto_or_failure_means_no_entry(tmp_path: Path, status: str) -> None:
+    h = Harness(tmp_path)
+    _with_critic(h, _critic_result(status))
+    result = h.cycle.run_day(THURSDAY)
+    assert result.steps["critique"] == status
+    assert result.steps["entry"] == "skipped"
+    assert not h.called("evaluate")  # the risk engine never sees a vetoed proposal
+    assert result.status == "no_trade"
+    assert result.summary == "skipped: the critic did not approve the proposal"
+
+
+def test_critic_crash_means_no_entry(tmp_path: Path) -> None:
+    h = Harness(tmp_path)
+    _with_critic(h, RuntimeError("model down"))
+    result = h.cycle.run_day(THURSDAY)
+    assert result.steps["critique"] == "error"
+    assert h.executor.count("enter") == 0
+
+
+def test_disabled_critic_lets_the_proposal_through(tmp_path: Path) -> None:
+    h = Harness(tmp_path)
+    _with_critic(h, None)
+    result = h.cycle.run_day(THURSDAY)
+    assert result.steps["critique"] == "disabled"
+    assert result.status == "traded"
+
+
+def test_no_critique_without_a_proposal(tmp_path: Path) -> None:
+    h = Harness(tmp_path, analysis="no_trade")
+    seen = _with_critic(h, _critic_result("approved"))
+    result = h.cycle.run_day(THURSDAY)
+    assert seen == []
+    assert "critique" not in result.steps
+
+
+def test_critic_sees_the_analysts_tool_calls(tmp_path: Path) -> None:
+    h = Harness(tmp_path)
+    calls = [
+        ToolCallRecord(call_id="c1", tool="get_quote", arguments={}, is_error=False, result="x")
+    ]
+    _rebuild(
+        h,
+        analyze=lambda run_id: _analysis(run_id=run_id).model_copy(
+            update={"tool_calls": tuple(calls)}
+        ),
+    )
+    seen = _with_critic(h, _critic_result("approved"))
+    h.cycle.run_day(THURSDAY)
+    assert seen == [1]
+
+
+@pytest.mark.parametrize(("recorded", "entered"), [("approved", True), ("vetoed", False)])
+def test_resume_respects_the_recorded_critique(
+    tmp_path: Path, recorded: str, entered: bool
+) -> None:
+    setup = Harness(tmp_path)
+    store = _resumed_store(setup, {"preflight": "ok", "analysis": "proposed", "critique": recorded})
+    h = Harness(tmp_path, start=at(10), store=store)
+    seen = _with_critic(h, _critic_result("approved"))
+    result = h.cycle.run_day(THURSDAY)
+    assert seen == []  # no second review
+    assert (h.executor.count("enter") == 1) is entered
+    assert result.steps["critique"] == recorded

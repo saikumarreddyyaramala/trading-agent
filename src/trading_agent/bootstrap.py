@@ -13,10 +13,12 @@ from typing import Any
 
 import anyio
 
-from trading_agent.agents.analyst import AnalystAgent
+from trading_agent.agents.analyst import AnalystAgent, ToolCallRecord
+from trading_agent.agents.critic import CriticAgent, CriticResult
 from trading_agent.data.alpaca_market_data import AlpacaMarketData
 from trading_agent.data.alpaca_news import AlpacaNews
 from trading_agent.data.collector import MarketDataCollector
+from trading_agent.domain.models import TradeProposal
 from trading_agent.domain.ports import (
     BrokerPort,
     LLMProviderPort,
@@ -38,7 +40,7 @@ from trading_agent.reporting.delivery import post_webhook, save_report
 from trading_agent.reporting.report import ReportBuilder, render_markdown
 from trading_agent.risk.engine import RiskEngine
 from trading_agent.settings.loader import ConfigError
-from trading_agent.settings.models import AppConfig
+from trading_agent.settings.models import AppConfig, LLMConfig
 from trading_agent.settings.secrets import (
     BROKER_SECRET_FIELDS,
     LLM_SECRET_FIELDS,
@@ -176,6 +178,12 @@ class Container:
         def analyze(run_id: str) -> Any:
             return anyio.run(self.build_analyst().run, run_id)
 
+        def critique(
+            run_id: str, proposal: TradeProposal, calls: list[ToolCallRecord]
+        ) -> CriticResult | None:
+            critic = self.build_critic()
+            return None if critic is None else critic.review(run_id, proposal, calls)
+
         return CycleServices(
             health_check=health_check,
             analyze=analyze,
@@ -185,6 +193,7 @@ class Container:
             orders_since=self.build_order_port().get_orders_since,
             recorder=self.build_recorder(),
             report=self.publish_report,
+            critique=critique,
         )
 
     def publish_report(self, day: date, *, send: bool = True) -> str:
@@ -210,8 +219,18 @@ class Container:
             self.config,
         )
 
-    def build_llm_gateway(self) -> LLMGateway:
+    def build_critic(self) -> CriticAgent | None:
+        """The critic, or None when it is disabled. Its own gateway: own model, own usage."""
+        critic = self.config.critic
+        if not critic.enabled:
+            return None
         llm = self.config.llm
+        if critic.model:
+            llm = llm.model_copy(update={"model": critic.model, "fallback_model": None})
+        return CriticAgent(self.build_llm_gateway(llm), self.config)
+
+    def build_llm_gateway(self, llm: LLMConfig | None = None) -> LLMGateway:
+        llm = llm or self.config.llm
         self._require("LLM", LLM_SECRET_FIELDS[llm.provider])
         provider: LLMProviderPort
         if llm.provider == "openai":

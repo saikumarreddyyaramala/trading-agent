@@ -394,6 +394,7 @@ def test_analysis_totals_by_run_prefix(db_engine: sa.Engine) -> None:
         store.record_analysis(_analysis(run_id).model_copy(update={"tool_calls": ()}))
     assert store.analysis_totals("daily-") == {
         "analyses": 2,
+        "critiques": 0,
         "input_tokens": 2000,
         "output_tokens": 400,
     }
@@ -420,3 +421,87 @@ def test_naive_timestamps_are_refused(db_engine: sa.Engine) -> None:
     store.start_run("r1", "daily")
     with pytest.raises(AuditError, match="timezone-aware"):
         store.record_step("r1", "preflight", "ok", "", datetime(2026, 10, 15, 8, 30))
+
+
+# ---------- Critiques and tool outputs ----------
+
+
+def _critique_result(run_id: str = "r1") -> Any:
+    from trading_agent.agents.critic import CriticResult, EvidenceCheck
+
+    return CriticResult(
+        run_id=run_id,
+        status="vetoed",
+        model_verdict="approve",
+        summary="Claim c2 has no support.",
+        reasons=("evidence 'c2' is unsupported: no news in the output",),
+        concerns=("thin volume",),
+        evidence_checks=(
+            EvidenceCheck(source_call_id="c1", supported=True, note="ok"),
+            EvidenceCheck(source_call_id="c2", supported=False, note="no news in the output"),
+        ),
+        model="judge",
+        prompt_version="critic-p",
+        usage=LLMUsage(input_tokens=700, output_tokens=80),
+        created_at=NOW,
+    )
+
+
+def test_critique_round_trip(db_engine: sa.Engine) -> None:
+    store = _store(db_engine)
+    store.start_run("r1", "daily")
+    store.record_critique(_critique_result())
+    row = store.get_critique("r1")
+    assert row is not None
+    assert (row["status"], row["model_verdict"], row["model"]) == ("vetoed", "approve", "judge")
+    assert row["evidence_checks"][1] == {
+        "source_call_id": "c2",
+        "supported": False,
+        "note": "no news in the output",
+    }
+    assert row["reasons"] == ["evidence 'c2' is unsupported: no news in the output"]
+    report = store.get_run("r1")
+    assert report is not None
+    assert report["critique"]["status"] == "vetoed"
+    assert store.get_critique("other") is None
+    totals = store.analysis_totals("r")
+    assert (totals["critiques"], totals["input_tokens"]) == (1, 700)
+
+
+def test_one_critique_per_run(db_engine: sa.Engine) -> None:
+    store = _store(db_engine)
+    store.start_run("r1", "daily")
+    store.record_critique(_critique_result())
+    with pytest.raises(AuditError):
+        store.record_critique(_critique_result())
+
+
+def test_tool_outputs_are_stored_and_read_back(db_engine: sa.Engine) -> None:
+    store = _store(db_engine)
+    store.start_run("r1", "analyze")
+    with_outputs = _analysis().model_copy(
+        update={
+            "tool_calls": (
+                ToolCallRecord(
+                    call_id="c1",
+                    tool="get_quote",
+                    arguments={"symbol": "AAPL"},
+                    is_error=False,
+                    result='{"ask": "100.1"}',
+                ),
+            )
+        }
+    )
+    store.record_analysis(with_outputs)
+    (call,) = store.tool_calls("r1")
+    assert call.result == '{"ask": "100.1"}'
+    assert call.arguments == {"symbol": "AAPL"}
+    assert store.tool_calls("none") == []
+
+
+def test_null_store_has_no_critiques() -> None:
+    store = NullAuditStore()
+    store.record_critique(_critique_result())
+    assert store.get_critique("r1") is None
+    assert store.tool_calls("r1") == []
+    assert store.analysis_totals("x")["critiques"] == 0

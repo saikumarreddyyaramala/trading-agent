@@ -48,6 +48,19 @@ class AnalysisSummary(BaseModel):
     cost_usd: Decimal | None
 
 
+class CriticSummary(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    status: str
+    summary: str
+    reasons: list[str]
+    concerns: list[str]
+    unsupported: list[str]
+    model: str
+    input_tokens: int
+    output_tokens: int
+
+
 class RiskSummary(BaseModel):
     model_config = ConfigDict(frozen=True)
 
@@ -59,6 +72,7 @@ class LlmTotals(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     analyses: int
+    critiques: int = 0
     input_tokens: int
     output_tokens: int
     cost_usd: Decimal | None
@@ -75,6 +89,7 @@ class DailyReport(BaseModel):
     cycle_summary: str | None
     steps: dict[str, str]
     analysis: AnalysisSummary | None
+    critic: CriticSummary | None
     risk: RiskSummary | None
     trade: TradeResult | None
     exits: list[str]
@@ -163,7 +178,7 @@ class ReportBuilder:
         try:
             totals = self._store.analysis_totals(SYSTEM_RUN_PREFIX)
         except AuditError:
-            totals = {"analyses": 0, "input_tokens": 0, "output_tokens": 0}
+            totals = {"analyses": 0, "critiques": 0, "input_tokens": 0, "output_tokens": 0}
 
         excess = None
         if today is not None and today.return_pct is not None and benchmark_today is not None:
@@ -178,6 +193,7 @@ class ReportBuilder:
             cycle_summary=run["run"]["summary"] if run else None,
             steps={s["step"]: s["status"] for s in run["steps"]} if run else {},
             analysis=self._analysis(run),
+            critic=self._critic(run),
             risk=self._risk(run),
             trade=today,
             exits=[f"{e['action']}: {e['detail']}" for e in run["position_events"]] if run else [],
@@ -188,6 +204,7 @@ class ReportBuilder:
             performance=summarize(trades, benchmark),
             llm=LlmTotals(
                 analyses=totals["analyses"],
+                critiques=totals.get("critiques", 0),
                 input_tokens=totals["input_tokens"],
                 output_tokens=totals["output_tokens"],
                 cost_usd=self._cost(totals["input_tokens"], totals["output_tokens"]),
@@ -218,6 +235,26 @@ class ReportBuilder:
             input_tokens=row["input_tokens"],
             output_tokens=row["output_tokens"],
             cost_usd=self._cost(row["input_tokens"], row["output_tokens"]),
+        )
+
+    @staticmethod
+    def _critic(run: dict[str, Any] | None) -> CriticSummary | None:
+        row = run.get("critique") if run else None
+        if not row:
+            return None
+        return CriticSummary(
+            status=row["status"],
+            summary=row["summary"],
+            reasons=list(row["reasons"]),
+            concerns=list(row["concerns"]),
+            unsupported=[
+                f"{c['source_call_id']}: {c['note']}"
+                for c in row["evidence_checks"]
+                if not c["supported"]
+            ],
+            model=row["model"],
+            input_tokens=row["input_tokens"],
+            output_tokens=row["output_tokens"],
         )
 
     @staticmethod
@@ -289,6 +326,27 @@ def render_markdown(report: DailyReport) -> str:
             lines += [f"- {risk}" for risk in analysis.risks]
             lines.append("")
 
+    critic = report.critic
+    if critic is not None:
+        lines += [
+            "## Critic",
+            f"**{critic.status.upper()}** by {critic.model}, "
+            f"{_tokens(critic.input_tokens, critic.output_tokens, None)}. {critic.summary}",
+            "",
+        ]
+        if critic.unsupported:
+            lines.append("Unsupported evidence:")
+            lines += [f"- {item}" for item in critic.unsupported]
+            lines.append("")
+        if critic.status != "approved" and critic.reasons:
+            lines.append("Why it did not pass:")
+            lines += [f"- {reason}" for reason in critic.reasons]
+            lines.append("")
+        if critic.concerns:
+            lines.append("Concerns:")
+            lines += [f"- {concern}" for concern in critic.concerns]
+            lines.append("")
+
     lines.append("## Risk check")
     if report.risk is None:
         lines += ["No risk check ran.", ""]
@@ -331,7 +389,7 @@ def render_markdown(report: DailyReport) -> str:
         f"| {_money(perf.total_pnl_usd)} | {_signed(perf.avg_return_pct)} "
         f"| {_signed(perf.avg_benchmark_pct)} | {_signed(perf.avg_excess_pct, ' pts')} |",
         "",
-        f"LLM usage: {report.llm.analyses} analyses, "
+        f"LLM usage: {report.llm.analyses} analyses, {report.llm.critiques} critiques, "
         f"{_tokens(report.llm.input_tokens, report.llm.output_tokens, report.llm.cost_usd)}.",
         "",
         f"Account equity: {_money(report.account_equity)} ({report.environment}).",

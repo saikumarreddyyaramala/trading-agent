@@ -24,7 +24,8 @@ from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel, ConfigDict
 
-from trading_agent.agents.analyst import AnalystResult
+from trading_agent.agents.analyst import AnalystResult, ToolCallRecord
+from trading_agent.agents.critic import CriticResult
 from trading_agent.domain.models import (
     BrokerOrder,
     MarketClock,
@@ -38,7 +39,7 @@ from trading_agent.settings.models import AppConfig
 from trading_agent.storage.store import AuditError, AuditRecorder, AuditStore
 
 MAX_SLEEP_SECONDS = 60  # wake at least this often while waiting, to log and stay responsive
-STEPS = ("preflight", "analysis", "entry", "close", "reconcile", "report")
+STEPS = ("preflight", "analysis", "critique", "entry", "close", "reconcile", "report")
 
 
 class ExecutorLike(Protocol):
@@ -62,6 +63,10 @@ class CycleServices:
     recorder: AuditRecorder
     # Builds, saves, and sends the day's report; returns a short description. Optional.
     report: Callable[[date], str] | None = None
+    # Reviews a buy proposal against the analyst's tool outputs; None result = disabled.
+    critique: Callable[[str, TradeProposal, list[ToolCallRecord]], CriticResult | None] | None = (
+        None
+    )
 
 
 @dataclass(frozen=True)
@@ -107,6 +112,7 @@ class DailyCycle:
         self._log = logger or get_logger(__name__)
         # Outcome of each step of the day in progress, whether or not a database is present.
         self._steps: dict[str, str] = {}
+        self._details: dict[str, str] = {}
 
     # ---------- Time ----------
 
@@ -168,6 +174,7 @@ class DailyCycle:
 
     def _step(self, run_id: str, step: str, status: str, detail: str, started: datetime) -> None:
         self._steps[step] = status
+        self._details[step] = detail
         self._log.info("cycle.step", run_id=run_id, step=step, status=status, detail=detail)
         self._record(f"step {step}", lambda s: s.record_step(run_id, step, status, detail, started))
 
@@ -203,6 +210,7 @@ class DailyCycle:
         except AuditError:
             done = {}
         self._steps = done  # steps finished before a restart, then this run's as they finish
+        self._details = {}
         audit_ok = self._record("run", lambda s: s.start_run(run_id, "daily"))
         if not audit_ok and self._services.recorder.required:
             self._log.error("cycle.audit_unavailable", run_id=run_id)
@@ -212,7 +220,8 @@ class DailyCycle:
         halted = self._preflight(run_id, session, done)
         if not audit_ok and self._services.recorder.required:
             halted = True  # no record, no trade
-        proposal = self._analysis(run_id, session, done, halted)
+        proposal, calls = self._analysis(run_id, session, done, halted)
+        proposal = self._critique(run_id, done, proposal, calls)
         traded = self._entry(run_id, session, done, halted, proposal)
         self._manage_until(run_id, session)
         closed_ok = self._close(run_id, session, done)
@@ -226,7 +235,9 @@ class DailyCycle:
         elif halted:
             status, summary = "halted", "pre-flight failed or audit unavailable: no new trades"
         else:
-            status, summary = "no_trade", steps.get("entry", "no entry")
+            entry = steps.get("entry", "no entry")
+            detail = self._details.get("entry")
+            status, summary = "no_trade", f"{entry}: {detail}" if detail else entry
         self._record("run result", lambda s: s.finish_run(run_id, status, summary))
         self._report(run_id, session, done)  # after the result, so the report includes it
         self._log.info("cycle.day_finished", run_id=run_id, status=status, summary=summary)
@@ -256,32 +267,63 @@ class DailyCycle:
 
     def _analysis(
         self, run_id: str, session: Session, done: dict[str, str], halted: bool
-    ) -> TradeProposal | None:
+    ) -> tuple[TradeProposal | None, list[ToolCallRecord]]:
+        """The verified proposal, if any, and the tool calls that produced its evidence."""
         if "analysis" in done:
+            store = self._services.recorder.store
             try:
-                return self._services.recorder.store.get_proposal(run_id)
+                return store.get_proposal(run_id), store.tool_calls(run_id)
             except AuditError:
-                return None
+                return None, []
         started = self._now()
         if halted:
             self._step(run_id, "analysis", "skipped", "trading halted", started)
-            return None
+            return None, []
         if self._now() >= session.trade_end:
             self._step(run_id, "analysis", "skipped", "too late: trade window over", started)
-            return None
+            return None, []
         self._wait_until(session.analysis, "analysis")
         started = self._now()
         try:
             result = self._services.analyze(run_id)
         except Exception as exc:
             self._step(run_id, "analysis", "error", str(exc), started)
-            return None
+            return None, []
         self._record("analysis", lambda s: s.record_analysis(result))
         self._step(run_id, "analysis", result.status, result.reason, started)
         done["analysis"] = result.status
         if result.status == "proposed" and result.proposal is not None:
-            return result.proposal
-        return None
+            return result.proposal, list(result.tool_calls)
+        return None, []
+
+    def _critique(
+        self,
+        run_id: str,
+        done: dict[str, str],
+        proposal: TradeProposal | None,
+        calls: list[ToolCallRecord],
+    ) -> TradeProposal | None:
+        """The proposal if the critic approves it (or is disabled); None after a veto."""
+        if proposal is None:
+            return None
+        if "critique" in done:
+            return proposal if done["critique"] in ("approved", "disabled") else None
+        started = self._now()
+        if self._services.critique is None:
+            self._step(run_id, "critique", "disabled", "no critic configured", started)
+            return proposal
+        try:
+            result = self._services.critique(run_id, proposal, calls)
+        except Exception as exc:
+            self._step(run_id, "critique", "error", str(exc), started)
+            return None  # no review, no trade
+        if result is None:
+            self._step(run_id, "critique", "disabled", "critic disabled in config", started)
+            return proposal
+        self._record("critique", lambda s: s.record_critique(result))
+        detail = "; ".join(result.reasons) or result.summary
+        self._step(run_id, "critique", result.status, detail, started)
+        return proposal if result.status == "approved" else None
 
     def _entry(
         self,
@@ -299,7 +341,12 @@ class DailyCycle:
             self._step(run_id, "entry", "skipped", "trading halted", started)
             return None
         if proposal is None:
-            self._step(run_id, "entry", "skipped", "no verified proposal", started)
+            reason = (
+                "the critic did not approve the proposal"
+                if self._steps.get("critique") in ("vetoed", "failed", "error")
+                else "no verified proposal"
+            )
+            self._step(run_id, "entry", "skipped", reason, started)
             return None
         if self._now() > session.trade_end:
             self._step(run_id, "entry", "skipped", "missed the trade window", started)

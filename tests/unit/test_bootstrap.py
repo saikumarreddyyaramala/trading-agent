@@ -208,3 +208,32 @@ def test_publish_report_saves_and_sends(
 def test_report_webhook_url(config_dir: Path) -> None:
     container = Container(config=load_config("paper", config_dir), secrets=make_secrets())
     assert container.report_webhook_url() is None
+
+
+def test_critic_uses_its_own_model_when_configured(config_dir: Path) -> None:
+    from trading_agent.agents.critic import CriticAgent
+
+    (config_dir / "paper.yaml").write_text(
+        "environment: paper\nbroker:\n  paper: true\ncritic:\n  model: gpt-6-luna\n",
+        encoding="utf-8",
+    )
+    container = Container(config=load_config("paper", config_dir), secrets=make_secrets())
+    critic = container.build_critic()
+    assert isinstance(critic, CriticAgent)
+    assert critic._gateway.models == ("gpt-6-luna",)
+
+
+def test_critic_defaults_to_the_analysts_model(config_dir: Path) -> None:
+    container = Container(config=load_config("paper", config_dir), secrets=make_secrets())
+    critic = container.build_critic()
+    assert critic is not None
+    assert critic._gateway.models == ("gpt-6.1-sol", "gpt-6-luna")
+
+
+def test_disabled_critic_is_none(config_dir: Path) -> None:
+    (config_dir / "paper.yaml").write_text(
+        "environment: paper\nbroker:\n  paper: true\ncritic:\n  enabled: false\n",
+        encoding="utf-8",
+    )
+    container = Container(config=load_config("paper", config_dir), secrets=make_secrets())
+    assert container.build_critic() is None

@@ -122,6 +122,8 @@ tool_calls = sa.Table(
     sa.Column("tool", sa.String(64), nullable=False),
     sa.Column("arguments", JSONType),
     sa.Column("is_error", sa.Boolean, nullable=False),
+    # What the model was shown (added in migration 0003; older rows have none).
+    sa.Column("result", sa.Text),
     sa.UniqueConstraint("run_id", "seq", name="uq_tool_calls_run_id_seq"),
 )
 
@@ -182,4 +184,23 @@ run_steps = sa.Table(
     sa.Column("started_at", Timestamp, nullable=False),
     sa.Column("finished_at", Timestamp, nullable=False),
     sa.UniqueConstraint("run_id", "step", name="uq_run_steps_run_id_step"),
+)
+
+# The critic's review of a run's proposal (one per run).
+critiques = sa.Table(
+    "critiques",
+    metadata,
+    sa.Column("id", sa.Integer, primary_key=True, autoincrement=True),
+    sa.Column("run_id", sa.String(64), sa.ForeignKey("runs.run_id"), nullable=False, unique=True),
+    sa.Column("status", sa.String(16), nullable=False),  # approved | vetoed | failed
+    sa.Column("model_verdict", sa.String(16)),
+    sa.Column("summary", sa.Text, nullable=False),
+    sa.Column("reasons", JSONType, nullable=False),
+    sa.Column("concerns", JSONType, nullable=False),
+    sa.Column("evidence_checks", JSONType, nullable=False),
+    sa.Column("model", sa.String(64), nullable=False),
+    sa.Column("prompt_version", sa.String(64), nullable=False),
+    sa.Column("input_tokens", sa.Integer, nullable=False),
+    sa.Column("output_tokens", sa.Integer, nullable=False),
+    sa.Column("created_at", Timestamp, nullable=False),
 )

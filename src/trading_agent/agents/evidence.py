@@ -29,8 +29,8 @@ class ProposalError(ValueError):
     """The final answer is not a valid proposal. The message is safe to show the model."""
 
 
-def parse_proposal(text: str) -> TradeProposal:
-    """Extract and validate the JSON proposal from the model's final message."""
+def extract_json_object(text: str) -> Any:
+    """The JSON object in a model's answer: fenced (```json), or the outermost braces."""
     fenced = _FENCED.search(text)
     if fenced:
         raw = fenced.group(1)
@@ -40,17 +40,26 @@ def parse_proposal(text: str) -> TradeProposal:
             raise ProposalError("the answer contains no JSON object")
         raw = text[start : end + 1]
     try:
-        data = json.loads(raw)
+        return json.loads(raw)
     except json.JSONDecodeError as exc:
         raise ProposalError(f"the answer is not valid JSON: {exc.msg}") from exc
+
+
+def schema_problems(exc: ValidationError) -> str:
+    return "; ".join(
+        f"{'.'.join(str(p) for p in err['loc']) or 'answer'}: {err['msg']}" for err in exc.errors()
+    )
+
+
+def parse_proposal(text: str) -> TradeProposal:
+    """Extract and validate the JSON proposal from the model's final message."""
+    data = extract_json_object(text)
     try:
         return TradeProposal.model_validate(data)
     except ValidationError as exc:
-        problems = "; ".join(
-            f"{'.'.join(str(p) for p in err['loc']) or 'proposal'}: {err['msg']}"
-            for err in exc.errors()
-        )
-        raise ProposalError(f"the JSON does not match the proposal schema: {problems}") from exc
+        raise ProposalError(
+            f"the JSON does not match the proposal schema: {schema_problems(exc)}"
+        ) from exc
 
 
 def _decimal(value: Any) -> Decimal | None:

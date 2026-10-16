@@ -57,6 +57,8 @@ class ToolCallRecord(BaseModel):
     tool: str
     arguments: dict[str, Any] | None
     is_error: bool
+    # Exactly what the model was shown (truncated like it was). Lets a reviewer check claims.
+    result: str | None = None
 
 
 class AnalystResult(BaseModel):
@@ -215,25 +217,31 @@ class AnalystAgent:
     ) -> ToolResult:
         arguments = _arguments(call)
         if arguments is None:
+            message = "arguments must be a JSON object"
             records.append(
-                ToolCallRecord(call_id=call.id, tool=call.name, arguments=None, is_error=True)
+                ToolCallRecord(
+                    call_id=call.id, tool=call.name, arguments=None, is_error=True, result=message
+                )
             )
             return ToolResult(
-                call_id=call.id,
-                content=f"call_id={call.id}\narguments must be a JSON object",
-                is_error=True,
+                call_id=call.id, content=f"call_id={call.id}\n{message}", is_error=True
             )
 
         result = await client.call_tool(call.name, arguments)
+        text = _result_text(result)
         records.append(
             ToolCallRecord(
-                call_id=call.id, tool=call.name, arguments=arguments, is_error=result.is_error
+                call_id=call.id,
+                tool=call.name,
+                arguments=arguments,
+                is_error=result.is_error,
+                result=text,
             )
         )
         if not result.is_error:
             ledger.record(call.id, call.name, arguments, result.structured_content)
         return ToolResult(
             call_id=call.id,
-            content=f"call_id={call.id}\n{_result_text(result)}",
+            content=f"call_id={call.id}\n{text}",
             is_error=result.is_error,
         )

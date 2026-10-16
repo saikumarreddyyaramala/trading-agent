@@ -23,6 +23,7 @@ from tests.conftest import (
 )
 from trading_agent import __version__, cli
 from trading_agent.agents.analyst import AnalystResult, ToolCallRecord
+from trading_agent.agents.critic import CriticResult, EvidenceCheck
 from trading_agent.bootstrap import Container
 from trading_agent.data import MarketDataCollector
 from trading_agent.domain.models import Evidence, LLMUsage, RiskDecision, TradeProposal
@@ -243,12 +244,44 @@ BUY = TradeProposal(
 )
 
 
-def _use_fake_analyst(monkeypatch: pytest.MonkeyPatch, result: AnalystResult) -> None:
+def _critique(status: str = "approved") -> CriticResult:
+    return CriticResult(
+        run_id="abc123",
+        status=status,  # type: ignore[arg-type]
+        model_verdict="approve" if status == "approved" else "veto",
+        summary="Claims match the data." if status == "approved" else "Momentum is fading.",
+        reasons=() if status == "approved" else ("the critic vetoed the trade",),
+        concerns=("Broad market weakness",),
+        evidence_checks=(
+            EvidenceCheck(source_call_id="c1", supported=True, note="spread 0.02% as stated"),
+        ),
+        model="gpt-6.1-sol",
+        prompt_version="critic-p",
+        usage=LLMUsage(input_tokens=3000, output_tokens=300),
+        created_at=NOW,
+    )
+
+
+def _use_fake_analyst(
+    monkeypatch: pytest.MonkeyPatch,
+    result: AnalystResult,
+    critique: CriticResult | None = None,
+) -> list[tuple[str, int]]:
+    """Fake analyst and critic. Returns the critic's calls: (run id, tool calls seen)."""
+    reviews: list[tuple[str, int]] = []
+
     class _Agent:
         async def run(self) -> AnalystResult:
             return result
 
+    class _Critic:
+        def review(self, run_id: str, proposal: TradeProposal, calls: list[object]) -> CriticResult:
+            reviews.append((run_id, len(calls)))
+            return critique or _critique()
+
     monkeypatch.setattr(Container, "build_analyst", lambda self: _Agent())
+    monkeypatch.setattr(Container, "build_critic", lambda self: _Critic())
+    return reviews
 
 
 def test_analyze_prints_verified_proposal(
@@ -286,9 +319,10 @@ def test_analyze_json(config_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None
     _use_fake_analyst(monkeypatch, _analysis("proposed", BUY))
     result = runner.invoke(cli.app, ["analyze", "--json", "--config-dir", str(config_dir)])
     payload = json.loads(result.stdout)
-    assert payload["status"] == "proposed"
-    assert payload["proposal"]["symbol"] == "AAPL"
-    assert payload["proposal"]["reference_price"] == "100.05"
+    assert payload["analysis"]["status"] == "proposed"
+    assert payload["analysis"]["proposal"]["symbol"] == "AAPL"
+    assert payload["analysis"]["proposal"]["reference_price"] == "100.05"
+    assert payload["critique"]["status"] == "approved"
 
 
 def test_analyze_without_keys_exits_2(config_dir: Path) -> None:
@@ -892,3 +926,90 @@ def test_report_bad_date_and_required_store(config_dir: Path) -> None:
     )
     result = runner.invoke(cli.app, ["report", "--config-dir", str(config_dir)])
     assert result.exit_code == 2
+
+
+# ---------- Critic in the CLI ----------
+
+
+def test_analyze_runs_the_critic_on_a_buy(
+    config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    reviews = _use_fake_analyst(monkeypatch, _analysis("proposed", BUY))
+    result = runner.invoke(cli.app, ["analyze", "--config-dir", str(config_dir)])
+    assert reviews == [("abc123", 1)]  # the analyst's tool calls reach the critic
+    assert "CRITIC APPROVED  [gpt-6.1-sol, 3,300 tokens]" in result.output
+    assert "Check     supported   c1: spread 0.02% as stated" in result.output
+    assert "Concern   - Broad market weakness" in result.output
+    assert result.output.rstrip().endswith("Approved proposals go to the risk engine.")
+
+
+def test_analyze_shows_a_veto(config_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _use_fake_analyst(monkeypatch, _analysis("proposed", BUY), _critique("vetoed"))
+    result = runner.invoke(cli.app, ["analyze", "--config-dir", str(config_dir)])
+    assert "CRITIC VETOED" in result.output
+    assert "Reason    - the critic vetoed the trade" in result.output
+
+
+def test_no_critic_for_no_trade_or_when_disabled(
+    config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    no_trade = TradeProposal(decision="no_trade", thesis="Quiet.", confidence="high")
+    reviews = _use_fake_analyst(monkeypatch, _analysis("no_trade", no_trade))
+    runner.invoke(cli.app, ["analyze", "--config-dir", str(config_dir)])
+    assert reviews == []
+
+    _use_fake_analyst(monkeypatch, _analysis("proposed", BUY))
+    monkeypatch.setattr(Container, "build_critic", lambda self: None)
+    result = runner.invoke(cli.app, ["analyze", "--config-dir", str(config_dir)])
+    assert "CRITIC" not in result.output
+
+
+def test_analyze_records_the_critique(
+    config_dir: Path, monkeypatch: pytest.MonkeyPatch, audit_db: sa.Engine
+) -> None:
+    _use_fake_analyst(monkeypatch, _analysis("proposed", BUY), _critique("vetoed"))
+    runner.invoke(cli.app, ["analyze", "--config-dir", str(config_dir)])
+    (row,) = _rows(audit_db, schema.critiques)
+    assert (row["run_id"], row["status"], row["model_verdict"]) == ("abc123", "vetoed", "veto")
+
+
+def _recorded_buy(audit_db: sa.Engine) -> None:
+    store = SqlAuditStore(audit_db, AppConfig())
+    store.start_run("abc123", "analyze")
+    store.record_analysis(_analysis("proposed", BUY))
+
+
+def test_critique_command_reviews_a_recorded_run(
+    config_dir: Path, monkeypatch: pytest.MonkeyPatch, audit_db: sa.Engine
+) -> None:
+    _recorded_buy(audit_db)
+    reviews = _use_fake_analyst(monkeypatch, _analysis("proposed", BUY))
+    result = runner.invoke(cli.app, ["critique", "abc123", "--config-dir", str(config_dir)])
+    assert result.exit_code == 0, result.output
+    assert reviews == [("abc123", 1)]  # tool calls (with outputs) loaded from the store
+    assert "CRITIC APPROVED" in result.output
+    assert _rows(audit_db, schema.critiques) == []  # a re-review records nothing
+
+    as_json = runner.invoke(
+        cli.app, ["critique", "abc123", "--json", "--config-dir", str(config_dir)]
+    )
+    assert json.loads(as_json.stdout)["status"] == "approved"
+
+
+def test_critique_command_errors(
+    config_dir: Path, monkeypatch: pytest.MonkeyPatch, audit_db: sa.Engine
+) -> None:
+    _use_fake_analyst(monkeypatch, _analysis("proposed", BUY))
+    missing = runner.invoke(cli.app, ["critique", "nope", "--config-dir", str(config_dir)])
+    assert missing.exit_code == 1
+    assert "No verified buy proposal" in missing.output
+
+    _recorded_buy(audit_db)
+    monkeypatch.setattr(Container, "build_critic", lambda self: None)
+    disabled = runner.invoke(cli.app, ["critique", "abc123", "--config-dir", str(config_dir)])
+    assert disabled.exit_code == 2
+    assert "disabled" in disabled.output
+
+    _use_fake_analyst(monkeypatch, _analysis("proposed", BUY), _critique("failed"))
+    failed = runner.invoke(cli.app, ["critique", "abc123", "--config-dir", str(config_dir)])
+    assert failed.exit_code == 1

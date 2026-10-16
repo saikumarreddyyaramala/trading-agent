@@ -16,6 +16,7 @@ import typer
 
 from trading_agent import __version__
 from trading_agent.agents.analyst import AnalystResult
+from trading_agent.agents.critic import CriticResult
 from trading_agent.bootstrap import Container
 from trading_agent.data.errors import MarketDataError
 from trading_agent.domain.models import Evidence, RiskDecision, SymbolData, TradeProposal
@@ -255,7 +256,24 @@ def _print_analysis(result: AnalystResult) -> None:
             typer.echo(f"Evidence  - {item.claim} [{item.source_call_id}]")
         for risk in proposal.risks:
             typer.echo(f"Risk      - {risk}")
-    typer.echo("\nNo order was placed. Proposals go to the risk engine (Phase 4).")
+
+
+def _print_critique(result: CriticResult) -> None:
+    colors = {"approved": typer.colors.GREEN, "vetoed": typer.colors.YELLOW}
+    typer.secho("\nCRITIC ", bold=True, nl=False)
+    typer.secho(
+        result.status.upper(), fg=colors.get(result.status, typer.colors.RED), bold=True, nl=False
+    )
+    usage = result.usage
+    typer.echo(f"  [{result.model}, {usage.input_tokens + usage.output_tokens:,} tokens]")
+    typer.echo(f"Summary   {result.summary}")
+    for check in result.evidence_checks:
+        mark = "supported" if check.supported else "UNSUPPORTED"
+        typer.echo(f"Check     {mark:<11} {check.source_call_id}: {check.note}")
+    for reason in result.reasons:
+        typer.echo(f"Reason    - {reason}")
+    for concern in result.concerns:
+        typer.echo(f"Concern   - {concern}")
 
 
 @app.command()
@@ -277,18 +295,33 @@ def analyze(
         raise typer.Exit(code=2) from exc
 
     result = anyio.run(agent.run)
+    critique: CriticResult | None = None
+    proposal = result.proposal
+    if result.status == "proposed" and proposal is not None and proposal.decision == "buy":
+        critic = container.build_critic()
+        if critic is not None:
+            critique = critic.review(result.run_id, proposal, list(result.tool_calls))
 
     def record(store: AuditStore) -> None:
         store.start_run(result.run_id, "analyze")
         store.record_analysis(result)
+        if critique is not None:
+            store.record_critique(critique)
         store.finish_run(result.run_id, result.status, result.reason)
 
     _audit(recorder, "analysis", record)
 
     if as_json:
-        typer.echo(result.model_dump_json(indent=2))
+        payload = {
+            "analysis": result.model_dump(mode="json"),
+            "critique": None if critique is None else critique.model_dump(mode="json"),
+        }
+        typer.echo(json.dumps(payload, indent=2))
     else:
         _print_analysis(result)
+        if critique is not None:
+            _print_critique(critique)
+        typer.echo("\nNo order was placed. Approved proposals go to the risk engine.")
     raise typer.Exit(code=1 if result.status == "failed" else 0)
 
 
@@ -703,6 +736,40 @@ def report(
     except DeliveryError as exc:
         typer.secho(str(exc), fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1) from exc
+
+
+@app.command()
+def critique(
+    run_id: Annotated[str, typer.Argument(help="A run with a verified buy proposal.")],
+    env: EnvOption = None,
+    config_dir: ConfigDirOption = None,
+    as_json: Annotated[bool, typer.Option("--json", help="Machine-readable output.")] = False,
+) -> None:
+    """Re-review a recorded proposal with the critic (uses LLM tokens). Records nothing."""
+    container = _container(env, config_dir)
+    store = _store_or_exit(container)
+    proposal = store.get_proposal(run_id)
+    if proposal is None:
+        typer.secho(
+            f"No verified buy proposal recorded for {run_id}.", fg=typer.colors.RED, err=True
+        )
+        raise typer.Exit(code=1)
+    try:
+        critic = container.build_critic()
+    except ConfigError as exc:
+        typer.secho(f"Configuration error: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=2) from exc
+    if critic is None:
+        typer.secho(
+            "The critic is disabled (critic.enabled: false).", fg=typer.colors.RED, err=True
+        )
+        raise typer.Exit(code=2)
+    result = critic.review(run_id, proposal, store.tool_calls(run_id))
+    if as_json:
+        typer.echo(result.model_dump_json(indent=2))
+    else:
+        _print_critique(result)
+    raise typer.Exit(code=1 if result.status == "failed" else 0)
 
 
 @app.command("show-config")

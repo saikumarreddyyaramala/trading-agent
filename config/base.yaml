@@ -67,6 +67,14 @@ analyst:
   max_total_tokens: 300000    # cost ceiling per run (input + output)
   repair_attempts: 1          # chances to fix an answer that fails the evidence checks
 
+# Critic: a second LLM reviews every buy proposal against the exact tool outputs.
+# It can only veto. Any critic failure means no trade.
+critic:
+  enabled: true
+  model: null                 # e.g. a different model for an independent view; null = analyst's
+  repair_attempts: 1
+  max_evidence_chars: 60000
+
 # Order execution (paper only until Phase 11). Exits are managed in code: a protective stop
 # goes on right after the entry fills; take-profit and the force-close run in `manage`.
 execution:
