@@ -18,8 +18,8 @@ risk engine, executes on a broker, and reports the result against the S&P 500.
 | 4 | Risk engine: 15 code-enforced checks, cash-only sizing, eligible-only candidates | Done |
 | 5 | Order execution (paper): idempotent entries, broker-side stops, managed exits | Done |
 | 6 | Audit trail: runs, analyses, tool calls, risk checks, orders, events (PostgreSQL) | Done |
-| 7 | Orchestration and scheduling | Next |
-| 8 | Daily report | Planned |
+| 7 | Daily cycle: scheduled steps, resume after restart, holidays and early closes | Done |
+| 8 | Daily report | Next |
 | 9 | Critic agent | Planned |
 | 10 | Evaluation | Planned |
 | 11 | Go live ($100) | Planned |
@@ -45,7 +45,7 @@ risk engine, executes on a broker, and reports the result against the S&P 500.
 Key rules (see [ADR 0001](docs/adr/0001-architecture.md), [ADR 0002](docs/adr/0002-market-data.md),
 [ADR 0003](docs/adr/0003-mcp-tools.md), [ADR 0004](docs/adr/0004-analyst-agent.md),
 [ADR 0005](docs/adr/0005-risk-engine.md), [ADR 0006](docs/adr/0006-order-execution.md),
-and [ADR 0007](docs/adr/0007-audit-trail.md)):
+[ADR 0007](docs/adr/0007-audit-trail.md), and [ADR 0008](docs/adr/0008-daily-cycle.md)):
 - The AI has read-only tools; it can never place an order directly. Tool inputs are
   validated and bounded, and each session has a call budget.
 - Every model call goes through the LLM gateway (pinned model, fallback, token caps, logs).
@@ -60,6 +60,8 @@ and [ADR 0007](docs/adr/0007-audit-trail.md)):
   cannot double-submit.
 - Every run is recorded (analysis, tool calls, risk checks, orders, exits) with a config
   snapshot. For live trading the audit store is required: no record, no trade.
+- The daily cycle never lets a failure block an exit: a failed step stops new trades,
+  but management, the force-close, and reconciliation always run.
 - Market data must pass quality and freshness rules; a symbol with bad data is rejected.
 
 ## Quick start
@@ -109,6 +111,8 @@ Ready
 | `uv run trading-agent manage` | One exit pass: force-close, take profit, keep a stop on every position |
 | `uv run trading-agent flatten --confirm` | Emergency: cancel all orders, close all positions |
 | `make test-paper-orders` | Round-trip a real order on the PAPER account (market hours) |
+| `uv run trading-agent run` | Run the daily cycle on the PAPER account, every trading day (`--once` for today only) |
+| `uv run trading-agent cycle-status` | Today's cycle: each step's status and detail |
 | `uv run trading-agent db upgrade` | Create or migrate the audit database (`DATABASE_URL`) |
 | `uv run trading-agent runs` | Recent runs from the audit trail |
 | `uv run trading-agent show-run RUN_ID` | Everything recorded for one run (JSON) |
@@ -131,7 +135,8 @@ src/trading_agent/
   agents/                analyst agent: prompts, tool-calling loop, evidence checks
   risk/                  eligibility rules, risk engine, position sizing
   storage/               audit trail: schema, Alembic migrations, store
-  orchestration/ reporting/   (upcoming phases)
+  orchestration/         the daily cycle: schedule, steps, resume, market calendar
+  reporting/             (upcoming phase)
   bootstrap.py           composition root
   health.py              pre-flight checks
   cli.py                 `trading-agent` command
@@ -139,6 +144,21 @@ tests/unit/              fast tests, no network, no keys
 tests/integration/       opt-in tests against real services
 docs/adr/                architecture decision records
 ```
+
+## The daily cycle
+
+`trading-agent run` (or `docker compose up -d`) runs one cycle per trading day, in market time:
+
+| Step | When | What |
+| --- | --- | --- |
+| preflight | 08:30 | health check; a failure halts new trades for the day |
+| analysis | 08:45 | the analyst researches and proposes one trade or none |
+| entry | 09:45 | risk check with fresh data; paper entry with a stop-loss if approved |
+| manage | every minute | take profit, keep the stop in place |
+| close | 15:50 | force-close and verify the account is flat (earlier on half-days) |
+| reconcile | 16:15 | sync final order statuses and fills |
+
+Each step is recorded once, so a restarted process resumes where it left off.
 
 ## Audit database
 

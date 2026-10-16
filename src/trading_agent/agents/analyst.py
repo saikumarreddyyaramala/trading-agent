@@ -108,8 +108,9 @@ class AnalystAgent:
         self._clock = clock or (lambda: datetime.now(UTC))
         self._log = logger or get_logger(__name__)
 
-    async def run(self) -> AnalystResult:
-        run_id = uuid.uuid4().hex[:12]
+    async def run(self, run_id: str | None = None) -> AnalystResult:
+        """One research run. `run_id` ties it to a larger run, such as the daily cycle."""
+        run_id = run_id or uuid.uuid4().hex[:12]
         started_at = self._clock()
         started = time.perf_counter()
         log = self._log.bind(run_id=run_id, agent="analyst")

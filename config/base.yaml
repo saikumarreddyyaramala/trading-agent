@@ -78,3 +78,9 @@ execution:
 # Audit trail (PostgreSQL; SQLite works locally). The URL comes from DATABASE_URL.
 storage:
   required: false             # true = no audit record, no trade. live.yaml sets true.
+
+# Daily cycle (`trading-agent run`). Step times come from `schedule` above.
+orchestration:
+  manage_interval_seconds: 60     # how often open positions are managed
+  early_close_buffer_minutes: 10  # on half-days, force-close this long before the close
+  close_settle_seconds: 30        # wait before verifying the account is flat

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
 
@@ -27,10 +27,12 @@ from trading_agent.bootstrap import Container
 from trading_agent.data import MarketDataCollector
 from trading_agent.domain.models import Evidence, LLMUsage, RiskDecision, TradeProposal
 from trading_agent.execution.executor import Executor
+from trading_agent.orchestration.cycle import DayResult
 from trading_agent.risk import RiskEngine
 from trading_agent.settings.models import AppConfig
 from trading_agent.storage import schema
-from trading_agent.storage.database import make_engine, upgrade
+from trading_agent.storage.database import head_revision, make_engine, upgrade
+from trading_agent.storage.store import SqlAuditStore
 
 runner = CliRunner()
 
@@ -533,7 +535,7 @@ def test_db_upgrade_and_status(
 
     result = runner.invoke(cli.app, ["db", "upgrade", "--config-dir", str(config_dir)])
     assert result.exit_code == 0, result.output
-    assert "Audit database (sqlite) is at schema 0001." in result.output
+    assert f"Audit database (sqlite) is at schema {head_revision()}." in result.output
 
     after = runner.invoke(cli.app, ["db", "status", "--config-dir", str(config_dir)])
     assert after.exit_code == 0
@@ -701,3 +703,89 @@ def test_sync_orders_broker_failure(
     result = runner.invoke(cli.app, ["sync-orders", "--config-dir", str(config_dir)])
     assert result.exit_code == 1
     assert "Could not fetch orders: broker down" in result.output
+
+
+# ---------- run / cycle-status ----------
+
+
+def _use_fake_cycle(monkeypatch: pytest.MonkeyPatch, result: DayResult) -> list[str]:
+    calls: list[str] = []
+
+    class _Cycle:
+        def __init__(self, services: object, config: object) -> None:
+            pass
+
+        def run_day(self, day: object) -> DayResult:
+            calls.append("run_day")
+            return result
+
+        def run_forever(self) -> None:
+            calls.append("run_forever")
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(Container, "build_cycle_services", lambda self: object())
+    monkeypatch.setattr(cli, "DailyCycle", _Cycle)
+    return calls
+
+
+TRADED = DayResult(
+    run_id="daily-20261015",
+    day=date(2026, 10, 15),
+    status="traded",
+    summary="entered 0.4899 AAPL at $102",
+    steps={"preflight": "ok", "entry": "entered"},
+)
+
+
+def test_run_once(config_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = _use_fake_cycle(monkeypatch, TRADED)
+    result = runner.invoke(cli.app, ["run", "--once", "--config-dir", str(config_dir)])
+    assert result.exit_code == 0, result.output
+    assert calls == ["run_day"]
+    assert "TRADED  daily-20261015: entered 0.4899 AAPL at $102" in result.output
+    assert "entry      entered" in result.output
+
+
+def test_run_once_error_exits_1(config_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _use_fake_cycle(monkeypatch, TRADED.model_copy(update={"status": "error"}))
+    result = runner.invoke(cli.app, ["run", "--once", "--config-dir", str(config_dir)])
+    assert result.exit_code == 1
+
+
+def test_run_forever_stops_cleanly_on_ctrl_c(
+    config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = _use_fake_cycle(monkeypatch, TRADED)
+    result = runner.invoke(cli.app, ["run", "--config-dir", str(config_dir)])
+    assert result.exit_code == 0
+    assert calls == ["run_forever"]
+    assert "Open positions keep their broker-side stop-loss" in result.output
+
+
+def test_run_refuses_without_keys(config_dir: Path) -> None:
+    result = runner.invoke(cli.app, ["run", "--once", "--config-dir", str(config_dir)])
+    assert result.exit_code == 2
+    assert "Cannot start the cycle" in result.output
+
+
+def test_cycle_status(config_dir: Path, audit_db: sa.Engine) -> None:
+    store = SqlAuditStore(audit_db, AppConfig())
+    store.start_run("daily-20261015", "daily")
+    store.record_step("daily-20261015", "preflight", "ok", "all checks passed", NOW)
+    store.finish_run("daily-20261015", "no_trade", "skipped")
+
+    result = runner.invoke(
+        cli.app, ["cycle-status", "--date", "2026-10-15", "--config-dir", str(config_dir)]
+    )
+    assert result.exit_code == 0, result.output
+    assert "daily-20261015: no_trade" in result.output
+    assert "preflight  ok         all checks passed" in result.output
+
+    missing = runner.invoke(
+        cli.app, ["cycle-status", "--date", "2026-10-14", "--config-dir", str(config_dir)]
+    )
+    assert missing.exit_code == 1
+    bad = runner.invoke(
+        cli.app, ["cycle-status", "--date", "Oct 15", "--config-dir", str(config_dir)]
+    )
+    assert bad.exit_code == 2

@@ -28,7 +28,8 @@ def test_migrations_match_the_schema_exactly(db_engine: sa.Engine) -> None:
 
 def test_upgrade_is_idempotent_and_reaches_head(db_engine: sa.Engine) -> None:
     upgrade(db_engine)
-    assert current_revision(db_engine) == head_revision() == "0001"
+    assert current_revision(db_engine) == head_revision()
+    assert head_revision() == "0002"
 
 
 def test_downgrade_removes_everything(db_engine: sa.Engine) -> None:

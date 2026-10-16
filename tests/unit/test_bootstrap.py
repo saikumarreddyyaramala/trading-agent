@@ -165,3 +165,18 @@ def test_required_audit_store_without_url_raises(config_dir: Path) -> None:
     )
     with pytest.raises(ConfigError, match="DATABASE_URL is not set"):
         container.build_audit_store()
+
+
+def test_builds_cycle_services(config_dir: Path) -> None:
+    container = Container(config=load_config("paper", config_dir), secrets=make_secrets())
+    services = container.build_cycle_services()
+    assert services.recorder.required is False
+    assert callable(services.analyze)
+    assert callable(services.health_check)
+
+
+def test_cycle_services_refuse_live(config_dir: Path) -> None:
+    secrets = make_secrets(live_trading_confirmed=True, database_url=SecretStr("sqlite://"))
+    container = Container(config=load_config("live", config_dir), secrets=secrets)
+    with pytest.raises(ExecutionDisabledError):
+        container.build_cycle_services()

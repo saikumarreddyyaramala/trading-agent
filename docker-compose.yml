@@ -1,9 +1,12 @@
-# Local stack: PostgreSQL, a one-shot schema migration, then the agent's health check.
-#   docker compose up            # health check against your .env
-#   docker compose run --rm agent runs
+# Local stack: PostgreSQL, a one-shot schema migration, then the daily trading cycle (PAPER).
+#   docker compose up -d                       # start; the cycle runs every trading day
+#   docker compose run --rm agent cycle-status # today's steps
+#   docker compose run --rm agent flatten --confirm
 services:
   agent:
     build: .
+    command: ["run"]
+    restart: unless-stopped  # a restart resumes the day without repeating finished steps
     env_file: .env
     environment:
       DATABASE_URL: postgresql://trading:trading@db:5432/trading

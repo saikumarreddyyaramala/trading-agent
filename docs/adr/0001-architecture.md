@@ -57,4 +57,4 @@ real services are opt-in and never run in CI.
   interviewers ask about.
 
 ## Planned decisions
-- 0008: Workflow engine for the daily cycle (Phase 7)
+- 0009: Daily report contents and delivery (Phase 8)

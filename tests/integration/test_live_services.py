@@ -12,6 +12,8 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
+from zoneinfo import ZoneInfo
 
 import anyio
 import pytest
@@ -22,6 +24,7 @@ from trading_agent.bootstrap import Container
 from trading_agent.data.quality import bar_issues
 from trading_agent.domain.models import ChatMessage, Evidence, LLMRequest, TradeProposal
 from trading_agent.mcp_server import ALLOWED_TOOLS
+from trading_agent.orchestration.cycle import DailyCycle
 from trading_agent.settings import Secrets, load_config
 from trading_agent.settings.secrets import LLM_SECRET_FIELDS
 
@@ -174,6 +177,23 @@ def test_analyst_end_to_end() -> None:
     print(result.model_dump_json(indent=2))  # visible with -s, for a human to judge the reasoning
     assert result.status in {"proposed", "no_trade"}, result.reason
     assert result.tool_calls, "the analyst should research before answering"
+
+
+def test_cycle_session_from_the_real_market_clock() -> None:
+    """The cycle's calendar logic against Alpaca's real clock (read-only)."""
+    container = _require("alpaca_api_key", "alpaca_secret_key")
+    clock = container.build_broker().get_clock()
+    zone = ZoneInfo(container.config.schedule.timezone)
+    today = datetime.now(zone).date()
+    services = SimpleNamespace(market_clock=lambda: clock)
+    session = DailyCycle(services, container.config).session(today)  # type: ignore[arg-type]
+    trading_today = clock.is_open or clock.next_open.astimezone(zone).date() == today
+    if session is None:
+        assert not trading_today or clock.next_close.astimezone(zone).date() != today
+    else:
+        assert session.day == today
+        assert session.force_close <= session.market_close
+        assert session.trade_start < session.trade_end < session.force_close
 
 
 @pytest.mark.paper_orders

@@ -7,6 +7,9 @@ testable with fakes and lets us swap vendors through config.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
+
+import anyio
 
 from trading_agent.agents.analyst import AnalystAgent
 from trading_agent.data.alpaca_market_data import AlpacaMarketData
@@ -22,11 +25,13 @@ from trading_agent.domain.ports import (
 from trading_agent.execution.alpaca_broker import AlpacaBroker
 from trading_agent.execution.alpaca_orders import AlpacaOrderExecutor
 from trading_agent.execution.executor import Executor
+from trading_agent.health import run_healthchecks
 from trading_agent.llm.anthropic_provider import AnthropicProvider
 from trading_agent.llm.gateway import LLMGateway
 from trading_agent.llm.openai_provider import OpenAIProvider
 from trading_agent.mcp_server.server import build_server
 from trading_agent.mcp_server.tools import ResearchTools
+from trading_agent.orchestration.cycle import CycleServices
 from trading_agent.risk.engine import RiskEngine
 from trading_agent.settings.loader import ConfigError
 from trading_agent.settings.models import AppConfig
@@ -145,6 +150,37 @@ class Container:
 
     def build_recorder(self) -> AuditRecorder:
         return AuditRecorder(self.build_audit_store(), required=self.config.storage.required)
+
+    def build_cycle_services(self) -> CycleServices:
+        """Everything the daily cycle needs. Agents, tools, and gateways are built fresh per
+        call, so each day gets its own tool budget and token accounting."""
+        url = self.database_url()
+        executor = self.build_executor()  # refuses a live configuration
+        broker = self.build_broker()
+
+        def health_check() -> list[Any]:
+            return run_healthchecks(
+                self.config,
+                self.secrets,
+                broker_factory=self.build_broker,
+                market_data_factory=self.build_market_data,
+                news_factory=self.build_news,
+                llm_factory=self.build_llm_gateway,
+                engine_factory=None if url is None else (lambda: make_engine(url)),
+            )
+
+        def analyze(run_id: str) -> Any:
+            return anyio.run(self.build_analyst().run, run_id)
+
+        return CycleServices(
+            health_check=health_check,
+            analyze=analyze,
+            evaluate=lambda proposal: self.build_risk_engine().evaluate(proposal),
+            executor=executor,
+            market_clock=broker.get_clock,
+            orders_since=self.build_order_port().get_orders_since,
+            recorder=self.build_recorder(),
+        )
 
     def build_llm_gateway(self) -> LLMGateway:
         llm = self.config.llm

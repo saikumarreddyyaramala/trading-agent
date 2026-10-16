@@ -170,6 +170,26 @@ def test_live_without_required_storage_is_rejected(config_dir: Path) -> None:
         load_config("live", config_dir)
 
 
+def test_repo_config_orchestration(config_dir: Path) -> None:
+    orchestration = load_config("paper", config_dir).orchestration
+    assert orchestration.manage_interval_seconds == 60
+    assert orchestration.early_close_buffer_minutes == 10
+    assert orchestration.close_settle_seconds == 30
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        {"manage_interval_seconds": 5},
+        {"early_close_buffer_minutes": 61},
+        {"close_settle_seconds": 0},
+    ],
+)
+def test_invalid_orchestration_settings_are_rejected(override: dict[str, object]) -> None:
+    with pytest.raises(ValueError, match="orchestration"):
+        AppConfig.model_validate({"orchestration": override})
+
+
 def test_repo_config_tool_budget(config_dir: Path) -> None:
     assert load_config("paper", config_dir).tools.max_calls_per_session == 100
 

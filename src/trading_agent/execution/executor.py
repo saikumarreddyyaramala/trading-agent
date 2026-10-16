@@ -15,7 +15,7 @@ from __future__ import annotations
 import re
 import time as _time
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, time
 from decimal import ROUND_DOWN, Decimal
 from typing import Any, Literal
 from zoneinfo import ZoneInfo
@@ -205,23 +205,27 @@ class Executor:
 
     # ---------- Exits ----------
 
-    def manage(self) -> tuple[ManageResult, ...]:
-        """One management pass over open positions: force-close, take profit, keep a stop."""
+    def manage(self, force_close_at: time | None = None) -> tuple[ManageResult, ...]:
+        """One management pass over open positions: force-close, take profit, keep a stop.
+
+        `force_close_at` overrides the configured close time, e.g. on an early-close day.
+        """
         try:
             positions = self._broker.get_positions()
         except Exception as exc:
             return (ManageResult(action="error", detail=f"positions unavailable: {exc}"),)
         if not positions:
             return (ManageResult(action="flat", detail="no open positions"),)
-        return tuple(self._manage_one(position) for position in positions)
+        close_at = force_close_at or self._config.schedule.force_close
+        return tuple(self._manage_one(position, close_at) for position in positions)
 
-    def _manage_one(self, position: Position) -> ManageResult:
+    def _manage_one(self, position: Position, force_close: time) -> ManageResult:
         risk = self._config.risk
         symbol = position.symbol
         schedule = self._config.schedule
         local_now = self._clock().astimezone(ZoneInfo(schedule.timezone))
-        if local_now.time() >= schedule.force_close:
-            return self._exit(symbol, f"force close at {schedule.force_close:%H:%M}", "force_close")
+        if local_now.time() >= force_close:
+            return self._exit(symbol, f"force close at {force_close:%H:%M}", "force_close")
 
         entry = position.avg_entry_price
         target = _cents_down(entry * (1 + risk.take_profit_pct / 100))

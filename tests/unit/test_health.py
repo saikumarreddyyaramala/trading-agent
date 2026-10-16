@@ -31,7 +31,7 @@ from trading_agent.llm import LLMGateway
 from trading_agent.settings import load_config
 from trading_agent.settings.models import AppConfig
 from trading_agent.settings.secrets import Secrets
-from trading_agent.storage.database import make_engine, upgrade
+from trading_agent.storage.database import head_revision, make_engine, upgrade
 
 
 def _by_name(results: list[CheckResult]) -> dict[str, CheckResult]:
@@ -291,7 +291,7 @@ def test_required_audit_store_without_url_fails(paper: AppConfig) -> None:
 def test_migrated_audit_store_passes(paper: AppConfig) -> None:
     check = _by_name(_run(paper, _db_secrets(), engine_factory=_migrated_engine))["Audit store"]
     assert check.status is CheckStatus.PASS
-    assert check.detail == "sqlite, schema 0001"
+    assert check.detail == f"sqlite, schema {head_revision()}"
 
 
 def test_unmigrated_audit_store_warns_or_fails(paper: AppConfig) -> None:

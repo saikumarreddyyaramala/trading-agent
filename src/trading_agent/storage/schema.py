@@ -144,3 +144,17 @@ position_events = sa.Table(
     sa.Column("action", sa.String(32), nullable=False),
     sa.Column("detail", sa.Text, nullable=False),
 )
+
+# One row per step of a daily cycle; lets a restarted process resume instead of redoing work.
+run_steps = sa.Table(
+    "run_steps",
+    metadata,
+    sa.Column("id", sa.Integer, primary_key=True, autoincrement=True),
+    sa.Column("run_id", sa.String(64), sa.ForeignKey("runs.run_id"), nullable=False),
+    sa.Column("step", sa.String(32), nullable=False),
+    sa.Column("status", sa.String(16), nullable=False),
+    sa.Column("detail", sa.Text, nullable=False),
+    sa.Column("started_at", Timestamp, nullable=False),
+    sa.Column("finished_at", Timestamp, nullable=False),
+    sa.UniqueConstraint("run_id", "step", name="uq_run_steps_run_id_step"),
+)

@@ -138,6 +138,17 @@ class ExecutionConfig(_Strict):
     cancel_timeout_seconds: int = Field(default=30, ge=5, le=300)
 
 
+class OrchestrationConfig(_Strict):
+    """The daily cycle. Step times come from `schedule`; these tune the loop."""
+
+    # How often open positions are managed during the session.
+    manage_interval_seconds: int = Field(default=60, ge=10, le=600)
+    # On early-close days, force-close this long before the market closes.
+    early_close_buffer_minutes: int = Field(default=10, ge=5, le=60)
+    # After the force-close, wait this long before checking that the account is flat.
+    close_settle_seconds: int = Field(default=30, ge=5, le=300)
+
+
 class StorageConfig(_Strict):
     """The audit trail. The database URL is a secret (DATABASE_URL), not config."""
 
@@ -158,6 +169,7 @@ class AppConfig(_Strict):
     analyst: AnalystConfig = AnalystConfig()
     execution: ExecutionConfig = ExecutionConfig()
     storage: StorageConfig = StorageConfig()
+    orchestration: OrchestrationConfig = OrchestrationConfig()
 
     @model_validator(mode="after")
     def _environment_matches_broker(self) -> AppConfig:

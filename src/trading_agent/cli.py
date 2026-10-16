@@ -5,10 +5,11 @@ from __future__ import annotations
 import json
 import uuid
 from collections.abc import Callable
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Annotated, Any
+from zoneinfo import ZoneInfo
 
 import anyio
 import typer
@@ -26,6 +27,7 @@ from trading_agent.execution.executor import (
 from trading_agent.health import CheckStatus, format_age, overall_ok, run_healthchecks
 from trading_agent.mcp_server.server import build_server
 from trading_agent.observability.logging import configure_logging
+from trading_agent.orchestration.cycle import DailyCycle, DayResult
 from trading_agent.settings.loader import ConfigError, load_config
 from trading_agent.settings.secrets import Secrets
 from trading_agent.storage.database import (
@@ -580,6 +582,79 @@ def sync_orders(
         raise typer.Exit(code=1) from exc
     _audit(recorder, "orders", lambda s: s.record_orders(None, orders))
     typer.echo(f"Synced {len(orders)} order(s) from the last {days} day(s).")
+
+
+def _print_day(result: DayResult) -> None:
+    color = {"traded": typer.colors.GREEN, "no_trade": typer.colors.YELLOW}.get(
+        result.status, typer.colors.RED if result.status == "error" else typer.colors.WHITE
+    )
+    typer.secho(f"{result.status.upper()}", fg=color, bold=True, nl=False)
+    typer.echo(f"  {result.run_id}: {result.summary}")
+    for step, status in result.steps.items():
+        typer.echo(f"  {step:<10} {status}")
+
+
+@app.command()
+def run(
+    once: Annotated[
+        bool, typer.Option("--once", help="Run today's cycle, then exit (default: every day).")
+    ] = False,
+    env: EnvOption = None,
+    config_dir: ConfigDirOption = None,
+) -> None:
+    """Run the daily trading cycle on the PAPER account, on the configured schedule.
+
+    Pre-flight, analysis (uses LLM tokens), risk check, entry, exit management, force-close,
+    and reconciliation. Safe to restart: finished steps are not repeated.
+    """
+    container = _container(env, config_dir)
+    try:
+        services = container.build_cycle_services()
+    except (ConfigError, ExecutionDisabledError) as exc:
+        typer.secho(f"Cannot start the cycle: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=2) from exc
+    cycle = DailyCycle(services, container.config)
+
+    if once:
+        today = datetime.now(ZoneInfo(container.config.schedule.timezone)).date()
+        result = cycle.run_day(today)
+        _print_day(result)
+        raise typer.Exit(code=1 if result.status == "error" else 0)
+    try:
+        cycle.run_forever()
+    except KeyboardInterrupt:
+        typer.echo(
+            "Stopped. Open positions keep their broker-side stop-loss. "
+            "Restart `trading-agent run` to resume, or run `trading-agent manage`."
+        )
+
+
+@app.command("cycle-status")
+def cycle_status(
+    day: Annotated[str | None, typer.Option("--date", help="YYYY-MM-DD (default: today).")] = None,
+    env: EnvOption = None,
+    config_dir: ConfigDirOption = None,
+) -> None:
+    """Show a day's cycle: each step's status and detail."""
+    container = _container(env, config_dir)
+    store = _store_or_exit(container)
+    try:
+        when = (
+            date.fromisoformat(day)
+            if day
+            else datetime.now(ZoneInfo(container.config.schedule.timezone)).date()
+        )
+    except ValueError as exc:
+        typer.secho(f"Invalid date: {day}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=2) from exc
+    report = store.get_run(DailyCycle.run_id(when))
+    if report is None:
+        typer.echo(f"No cycle recorded for {when}.")
+        raise typer.Exit(code=1)
+    run_row = report["run"]
+    typer.echo(f"{run_row['run_id']}: {run_row['status'] or 'running'}  {run_row['summary'] or ''}")
+    for step in report["steps"]:
+        typer.echo(f"  {step['step']:<10} {step['status']:<10} {step['detail']}")
 
 
 @app.command("show-config")

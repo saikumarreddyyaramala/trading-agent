@@ -12,7 +12,7 @@ from pydantic import BaseModel, ConfigDict
 
 from trading_agent import __version__
 from trading_agent.agents.analyst import AnalystResult
-from trading_agent.domain.models import BrokerOrder, RiskDecision
+from trading_agent.domain.models import BrokerOrder, RiskDecision, TradeProposal
 from trading_agent.execution.executor import ManageResult
 from trading_agent.observability.logging import get_logger
 from trading_agent.settings.models import AppConfig
@@ -66,6 +66,18 @@ class AuditStore(Protocol):
 
     def record_position_event(self, run_id: str | None, result: ManageResult) -> None: ...
 
+    def record_step(
+        self, run_id: str, step: str, status: str, detail: str, started_at: datetime
+    ) -> None: ...
+
+    def completed_steps(self, run_id: str) -> dict[str, str]:
+        """Step name to status for the steps a run has already finished."""
+        ...
+
+    def get_proposal(self, run_id: str) -> TradeProposal | None:
+        """The verified buy proposal recorded for a run, if there is one."""
+        ...
+
     def list_runs(self, limit: int) -> list[RunSummary]: ...
 
     def get_run(self, run_id: str) -> dict[str, Any] | None: ...
@@ -90,6 +102,17 @@ class NullAuditStore:
         return None
 
     def record_position_event(self, run_id: str | None, result: ManageResult) -> None:
+        return None
+
+    def record_step(
+        self, run_id: str, step: str, status: str, detail: str, started_at: datetime
+    ) -> None:
+        return None
+
+    def completed_steps(self, run_id: str) -> dict[str, str]:
+        return {}
+
+    def get_proposal(self, run_id: str) -> TradeProposal | None:
         return None
 
     def list_runs(self, limit: int) -> list[RunSummary]:
@@ -267,7 +290,45 @@ class SqlAuditStore:
         self._write(f"position event {result.action}", write)
         self.record_orders(run_id, result.orders)
 
+    def record_step(
+        self, run_id: str, step: str, status: str, detail: str, started_at: datetime
+    ) -> None:
+        def write(connection: sa.Connection) -> None:
+            connection.execute(
+                schema.run_steps.insert().values(
+                    run_id=run_id,
+                    step=step,
+                    status=status,
+                    detail=detail[:2000],
+                    started_at=started_at,
+                    finished_at=self._clock(),
+                )
+            )
+
+        self._write(f"step {step} of run {run_id}", write)
+
     # ---------- Reads ----------
+
+    def completed_steps(self, run_id: str) -> dict[str, str]:
+        steps = schema.run_steps
+
+        def read(connection: sa.Connection) -> dict[str, str]:
+            query = sa.select(steps.c.step, steps.c.status).where(steps.c.run_id == run_id)
+            return {row.step: row.status for row in connection.execute(query)}
+
+        return self._read(f"steps of run {run_id}", read)
+
+    def get_proposal(self, run_id: str) -> TradeProposal | None:
+        analyses = schema.analyses
+
+        def read(connection: sa.Connection) -> TradeProposal | None:
+            query = sa.select(analyses.c.proposal).where(
+                analyses.c.run_id == run_id, analyses.c.status == "proposed"
+            )
+            raw = connection.execute(query).scalar_one_or_none()
+            return None if raw is None else TradeProposal.model_validate(raw)
+
+        return self._read(f"proposal of run {run_id}", read)
 
     def _read[T](self, what: str, fn: Callable[[sa.Connection], T]) -> T:
         try:
@@ -333,6 +394,7 @@ class SqlAuditStore:
                 "position_events": rows(
                     connection, schema.position_events, schema.position_events.c.id
                 ),
+                "steps": rows(connection, schema.run_steps, schema.run_steps.c.id),
             }
 
         return self._read(f"run {run_id}", read)
