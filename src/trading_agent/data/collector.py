@@ -62,7 +62,12 @@ class MarketDataCollector:
         for symbol in wanted:
             try:
                 collected[symbol] = self._build(
-                    symbol, quotes.get(symbol), bars.get(symbol, ()), news, now, require_fresh_quotes
+                    symbol,
+                    quotes.get(symbol),
+                    bars.get(symbol, ()),
+                    news,
+                    now,
+                    require_fresh_quotes,
                 )
             except MarketDataError as exc:
                 rejected[symbol] = str(exc)
