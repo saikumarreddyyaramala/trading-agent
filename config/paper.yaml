@@ -1,0 +1,5 @@
+# Paper trading: simulated money. This is the default environment.
+environment: paper
+
+broker:
+  paper: true

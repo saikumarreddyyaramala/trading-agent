@@ -1,0 +1,41 @@
+# Base configuration shared by every environment.
+# Environment files (paper.yaml, live.yaml) override these values.
+# Secrets (API keys) never go here: they come from environment variables or a secrets manager.
+
+environment: paper
+
+# Emergency stop. When true, the agent may research and report but never places orders.
+kill_switch: false
+
+schedule:
+  timezone: America/New_York
+  data_collection: "08:30"
+  analysis: "08:45"
+  trade_window_start: "09:45"
+  trade_window_end: "15:30"
+  force_close: "15:50"
+  report: "16:15"
+
+risk:
+  max_trades_per_day: 1
+  max_position_usd: 50
+  stop_loss_pct: 5
+  take_profit_pct: 10
+  account_floor_usd: 70
+  min_price_usd: 5
+  min_avg_daily_volume: 1000000
+  allowed_exchanges: [NYSE, NASDAQ]
+  max_price_deviation_pct: 2
+  max_data_age_seconds: 300
+
+llm:
+  provider: anthropic
+  model: claude-sonnet-5-5
+  fallback_model: claude-haiku-5-5
+  max_tokens: 4096
+  timeout_seconds: 60
+  max_retries: 2
+
+broker:
+  provider: alpaca
+  paper: true

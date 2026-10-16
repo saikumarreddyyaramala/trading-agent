@@ -1,0 +1,7 @@
+# Live trading: REAL money.
+# Loading this file is not enough to trade live. The process also needs
+# LIVE_TRADING_CONFIRMED=true in its environment (a deliberate, separate switch).
+environment: live
+
+broker:
+  paper: false
