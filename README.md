@@ -13,8 +13,8 @@ risk engine, executes on a broker, and reports the result against the S&P 500.
 | --- | --- | --- |
 | 0 | Foundations: config, secrets, logging, LLM gateway, broker connection, health check, CI | Done |
 | 1 | Market data and news: quotes, daily bars, assets, news, freshness rules | Done |
-| 2 | MCP server (read-only tools) | Next |
-| 3 | Analyst agent | Planned |
+| 2 | MCP server: 7 read-only research tools, input bounds, call budget, audit log | Done |
+| 3 | Analyst agent | Next |
 | 4 | Risk engine | Planned |
 | 5 | Order execution (paper) | Planned |
 | 6 | PostgreSQL audit trail | Planned |
@@ -40,8 +40,10 @@ risk engine, executes on a broker, and reports the result against the S&P 500.
  bootstrap.py (composition root) wires adapters to ports from config + secrets
 ```
 
-Key rules (see [ADR 0001](docs/adr/0001-architecture.md) and [ADR 0002](docs/adr/0002-market-data.md)):
-- The AI has read-only tools; it can never place an order directly.
+Key rules (see [ADR 0001](docs/adr/0001-architecture.md), [ADR 0002](docs/adr/0002-market-data.md),
+and [ADR 0003](docs/adr/0003-mcp-tools.md)):
+- The AI has read-only tools; it can never place an order directly. Tool inputs are
+  validated and bounded, and each session has a call budget.
 - Every model call goes through the LLM gateway (pinned model, fallback, token caps, logs).
 - Config is versioned YAML; secrets come only from the environment and are redacted.
 - Any failed or erroring check means "no trade".
@@ -88,6 +90,7 @@ Ready
 | `make healthcheck` | Pre-flight check with your `.env` |
 | `make docker-healthcheck` | Build the container and run the health check inside it |
 | `uv run trading-agent market-data AAPL MSFT` | Quotes, daily bars, and news for symbols (`--fresh` enforces quote freshness, `--json` for machines) |
+| `uv run trading-agent mcp-server` | Serve the read-only research tools over MCP (stdio) |
 | `uv run trading-agent show-config` | Print the effective config (never secrets) |
 
 ## Project layout
@@ -101,7 +104,8 @@ src/trading_agent/
   llm/                   LLM gateway + OpenAI and Anthropic adapters
   execution/             Alpaca adapter (orders in Phase 5)
   data/                  market data + news adapters, quality/freshness rules, collector
-  mcp_server/ agents/ risk/ storage/ orchestration/ reporting/   (upcoming phases)
+  mcp_server/            read-only research tools + MCP server (stdio)
+  agents/ risk/ storage/ orchestration/ reporting/   (upcoming phases)
   bootstrap.py           composition root
   health.py              pre-flight checks
   cli.py                 `trading-agent` command
@@ -109,6 +113,18 @@ tests/unit/              fast tests, no network, no keys
 tests/integration/       opt-in tests against real services
 docs/adr/                architecture decision records
 ```
+
+## Research tools over MCP
+
+The agent's research tools are also an MCP server, so you can explore them from any MCP host.
+For example, to add them to Claude Code (run from the repo root, with `.env` filled in):
+
+```bash
+claude mcp add trading-research -- uv run --directory "$(pwd)" trading-agent mcp-server
+```
+
+Tools: `market_status`, `get_quote`, `get_daily_bars`, `get_news`, `get_asset`,
+`get_most_active`, `research_snapshot`. All are read-only; none can trade.
 
 ## Configuration
 

@@ -8,6 +8,7 @@ license = { text = "MIT" }
 dependencies = [
     "alpaca-py>=0.44",
     "anthropic>=1.15",
+    "mcp>=2.3,<3",
     "openai>=2",
     "pydantic>=2.9",
     "pydantic-settings>=2.6",

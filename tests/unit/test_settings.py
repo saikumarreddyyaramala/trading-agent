@@ -122,6 +122,16 @@ def test_invalid_market_data_settings_are_rejected(override: dict[str, object]) 
         AppConfig.model_validate({"market_data": override})
 
 
+def test_repo_config_tool_budget(config_dir: Path) -> None:
+    assert load_config("paper", config_dir).tools.max_calls_per_session == 100
+
+
+@pytest.mark.parametrize("value", [0, -1, 1001])
+def test_tool_budget_must_be_sane(value: int) -> None:
+    with pytest.raises(ValueError, match="max_calls_per_session"):
+        AppConfig.model_validate({"tools": {"max_calls_per_session": value}})
+
+
 def test_live_trading_requires_explicit_confirmation(config_dir: Path) -> None:
     live = load_config("live", config_dir)
     with pytest.raises(ConfigError, match="LIVE_TRADING_CONFIRMED"):

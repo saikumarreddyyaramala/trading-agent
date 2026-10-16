@@ -13,6 +13,7 @@ from typing import Protocol, runtime_checkable
 
 from trading_agent.domain.models import (
     AccountSnapshot,
+    ActiveStock,
     Asset,
     Bar,
     LLMRequest,
@@ -58,6 +59,10 @@ class MarketDataPort(Protocol):
 
     def get_daily_bars(self, symbols: Sequence[str], *, days: int) -> dict[str, tuple[Bar, ...]]:
         """The most recent `days` daily bars per symbol, oldest first."""
+        ...
+
+    def get_most_active(self, limit: int) -> tuple[ActiveStock, ...]:
+        """Today's most traded stocks by share volume, most active first."""
         ...
 
 

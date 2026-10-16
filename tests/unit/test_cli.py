@@ -165,3 +165,32 @@ def test_market_data_outage_exits_1(config_dir: Path, monkeypatch: pytest.Monkey
     result = runner.invoke(cli.app, ["market-data", "AAPL", "--config-dir", str(config_dir)])
     assert result.exit_code == 1
     assert "Market data unavailable" in result.output
+
+
+# ---------- mcp-server ----------
+
+
+def test_mcp_server_serves_stdio(config_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    served: list[tuple[object, str]] = []
+    sentinel = object()
+    monkeypatch.setattr(Container, "build_research_tools", lambda self: sentinel)
+
+    class _Server:
+        def __init__(self, tools: object) -> None:
+            self.tools = tools
+
+        def run(self, transport: str) -> None:
+            served.append((self.tools, transport))
+
+    monkeypatch.setattr(cli, "build_server", _Server)
+    result = runner.invoke(cli.app, ["mcp-server", "--config-dir", str(config_dir)])
+
+    assert result.exit_code == 0, result.output
+    assert served == [(sentinel, "stdio")]
+    assert result.stdout == ""  # stdout belongs to the MCP protocol
+
+
+def test_mcp_server_without_keys_exits_2(config_dir: Path) -> None:
+    result = runner.invoke(cli.app, ["mcp-server", "--config-dir", str(config_dir)])
+    assert result.exit_code == 2
+    assert "missing market data credentials" in result.output

@@ -170,3 +170,46 @@ def test_errors_are_wrapped() -> None:
         adapter.get_daily_bars(["AAPL"], days=5)
     with pytest.raises(MarketDataError, match="asset lookup failed for AAPL"):
         adapter.get_asset("AAPL")
+
+
+# ---------- Most active screener ----------
+
+
+class _Screener:
+    def __init__(self, *, fail: bool = False) -> None:
+        self.fail = fail
+        self.requests: list[Any] = []
+
+    def get_most_actives(self, request: Any) -> Any:
+        self.requests.append(request)
+        if self.fail:
+            raise ConnectionError("network down")
+        return SimpleNamespace(
+            most_actives=[
+                SimpleNamespace(symbol="F", volume=10.0, trade_count=5.0),
+                SimpleNamespace(symbol="NVDA", volume=900.0, trade_count=80.0),
+            ]
+        )
+
+
+def test_most_active_is_translated_and_sorted() -> None:
+    screener = _Screener()
+    adapter, _ = _adapter(screener_client=screener)
+    stocks = adapter.get_most_active(2)
+    assert [s.symbol for s in stocks] == ["NVDA", "F"]
+    assert stocks[0].volume == 900
+    assert stocks[0].trade_count == 80
+    assert screener.requests[0].top == 2
+
+
+@pytest.mark.parametrize("limit", [0, 101])
+def test_most_active_limit_is_bounded(limit: int) -> None:
+    adapter, _ = _adapter(screener_client=_Screener())
+    with pytest.raises(ValueError, match="limit must be between 1 and 100"):
+        adapter.get_most_active(limit)
+
+
+def test_most_active_errors_are_wrapped() -> None:
+    adapter, _ = _adapter(screener_client=_Screener(fail=True))
+    with pytest.raises(MarketDataError, match="could not fetch most active stocks"):
+        adapter.get_most_active(5)

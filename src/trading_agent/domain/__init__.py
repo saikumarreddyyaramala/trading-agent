@@ -2,6 +2,7 @@
 
 from trading_agent.domain.models import (
     AccountSnapshot,
+    ActiveStock,
     Asset,
     Bar,
     ChatMessage,
@@ -18,6 +19,7 @@ from trading_agent.domain.ports import BrokerPort, LLMProviderPort, MarketDataPo
 
 __all__ = [
     "AccountSnapshot",
+    "ActiveStock",
     "Asset",
     "Bar",
     "BrokerPort",

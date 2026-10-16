@@ -7,14 +7,19 @@ Run locally with:  make test-integration
 from __future__ import annotations
 
 import os
+import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import anyio
 import pytest
+from mcp import Client, StdioServerParameters
+from mcp_types import CallToolResult
 
 from trading_agent.bootstrap import Container
 from trading_agent.data.quality import bar_issues
 from trading_agent.domain.models import ChatMessage, LLMRequest
+from trading_agent.mcp_server import ALLOWED_TOOLS
 from trading_agent.settings import Secrets, load_config
 from trading_agent.settings.secrets import LLM_SECRET_FIELDS
 
@@ -80,6 +85,35 @@ def test_collector_end_to_end() -> None:
     snapshot = collector.collect(["AAPL", "MSFT"], require_fresh_quotes=False)
     assert set(snapshot.symbols) == {"AAPL", "MSFT"}, snapshot.rejected
     assert snapshot.symbols["AAPL"].asset.exchange == "NASDAQ"
+
+
+def test_research_tools_against_alpaca() -> None:
+    tools = _require("alpaca_api_key", "alpaca_secret_key").build_research_tools()
+    active = tools.get_most_active(10)["stocks"]
+    assert active
+    snapshot = tools.research_snapshot([active[0]["symbol"], "SPY"])
+    assert snapshot["symbols"], snapshot["rejected"]
+    assert tools.market_status()["next_open"]
+
+
+def test_mcp_server_over_stdio() -> None:
+    """Launch the real server as a subprocess, exactly as an agent host would."""
+    _require("alpaca_api_key", "alpaca_secret_key")
+    params = StdioServerParameters(
+        command=sys.executable, args=["-m", "trading_agent.cli", "mcp-server"], cwd=str(REPO)
+    )
+
+    async def main() -> tuple[set[str], CallToolResult]:
+        async with Client(params) as client:
+            listed = await client.list_tools()
+            quote = await client.call_tool("get_quote", {"symbol": "SPY"})
+            return {t.name for t in listed.tools}, quote
+
+    names, quote = anyio.run(main)
+    assert names == ALLOWED_TOOLS
+    assert quote.is_error is False
+    assert quote.structured_content is not None
+    assert quote.structured_content["symbol"] == "SPY"
 
 
 @pytest.mark.skipif(os.environ.get("CI") == "true", reason="never spend LLM tokens in CI")

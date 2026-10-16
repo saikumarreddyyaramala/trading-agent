@@ -9,6 +9,7 @@ from trading_agent.bootstrap import Container
 from trading_agent.data import AlpacaMarketData, AlpacaNews, MarketDataCollector
 from trading_agent.execution import AlpacaBroker
 from trading_agent.llm import LLMGateway
+from trading_agent.mcp_server import ResearchTools
 from trading_agent.settings import ConfigError, load_config
 
 
@@ -35,7 +36,16 @@ def test_builds_market_data_news_and_collector(config_dir: Path) -> None:
     assert isinstance(container.build_collector(), MarketDataCollector)
 
 
-@pytest.mark.parametrize("builder", ["build_market_data", "build_news", "build_collector"])
+def test_builds_research_tools_with_configured_budget(config_dir: Path) -> None:
+    container = Container(config=load_config("paper", config_dir), secrets=make_secrets())
+    tools = container.build_research_tools()
+    assert isinstance(tools, ResearchTools)
+    assert tools.calls_remaining == 100
+
+
+@pytest.mark.parametrize(
+    "builder", ["build_market_data", "build_news", "build_collector", "build_research_tools"]
+)
 def test_market_data_needs_alpaca_keys(config_dir: Path, builder: str) -> None:
     container = Container(
         config=load_config("paper", config_dir), secrets=make_secrets(alpaca_api_key=None)

@@ -16,6 +16,7 @@ from trading_agent.execution.alpaca_broker import AlpacaBroker
 from trading_agent.llm.anthropic_provider import AnthropicProvider
 from trading_agent.llm.gateway import LLMGateway
 from trading_agent.llm.openai_provider import OpenAIProvider
+from trading_agent.mcp_server.tools import ResearchTools
 from trading_agent.settings.loader import ConfigError
 from trading_agent.settings.models import AppConfig
 from trading_agent.settings.secrets import (
@@ -61,12 +62,27 @@ class Container:
             self.secrets.require("alpaca_api_key"), self.secrets.require("alpaca_secret_key")
         )
 
-    def build_collector(self) -> MarketDataCollector:
+    def build_collector(
+        self, market_data: MarketDataPort | None = None, news: NewsPort | None = None
+    ) -> MarketDataCollector:
         return MarketDataCollector(
-            self.build_market_data(),
-            self.build_news(),
+            market_data or self.build_market_data(),
+            news or self.build_news(),
             self.config.market_data,
             max_data_age_seconds=self.config.risk.max_data_age_seconds,
+        )
+
+    def build_research_tools(self) -> ResearchTools:
+        """Read-only tools for agents. The broker is used only for the market clock."""
+        market_data = self.build_market_data()
+        news = self.build_news()
+        return ResearchTools(
+            market_data,
+            news,
+            self.build_collector(market_data, news),
+            self.build_broker().get_clock,
+            max_data_age_seconds=self.config.risk.max_data_age_seconds,
+            max_calls=self.config.tools.max_calls_per_session,
         )
 
     def build_llm_gateway(self) -> LLMGateway:

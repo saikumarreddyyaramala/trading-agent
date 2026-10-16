@@ -15,6 +15,7 @@ from pydantic import SecretStr
 from trading_agent.data.errors import MarketDataError
 from trading_agent.domain.models import (
     AccountSnapshot,
+    ActiveStock,
     Asset,
     Bar,
     LLMRequest,
@@ -220,11 +221,13 @@ class FakeMarketData:
         quotes: dict[str, Quote] | None = None,
         bars: dict[str, tuple[Bar, ...]] | None = None,
         assets: dict[str, Asset] | None = None,
+        active: Sequence[ActiveStock] = (),
         fail: bool = False,
     ) -> None:
         self.quotes = quotes or {}
         self.bars = bars or {}
         self.assets = assets or {}
+        self.active = tuple(active)
         self.fail = fail
         self.calls: list[tuple[str, tuple[str, ...]]] = []
 
@@ -243,6 +246,12 @@ class FakeMarketData:
     def get_daily_bars(self, symbols: Sequence[str], *, days: int) -> dict[str, tuple[Bar, ...]]:
         self.calls.append(("bars", tuple(symbols)))
         return {s: self.bars[s][-days:] for s in symbols if s in self.bars}
+
+    def get_most_active(self, limit: int) -> tuple[ActiveStock, ...]:
+        self.calls.append(("most_active", (str(limit),)))
+        if self.fail:
+            raise MarketDataError("could not fetch most active stocks: down")
+        return self.active[:limit]
 
 
 def healthy_market_data(*symbols: str) -> FakeMarketData:

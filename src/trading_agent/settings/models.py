@@ -102,6 +102,13 @@ class MarketDataConfig(_Strict):
     news_per_symbol: int = Field(default=5, gt=0, le=50)
 
 
+class ToolsConfig(_Strict):
+    """Limits for the read-only research tools agents use (MCP server and in-process)."""
+
+    # Calls allowed per agent run or MCP session; protects the data provider from loops.
+    max_calls_per_session: int = Field(default=100, gt=0, le=1000)
+
+
 class AppConfig(_Strict):
     environment: Environment = Environment.PAPER
     kill_switch: bool = False
@@ -110,6 +117,7 @@ class AppConfig(_Strict):
     llm: LLMConfig = LLMConfig()
     broker: BrokerConfig = BrokerConfig()
     market_data: MarketDataConfig = MarketDataConfig()
+    tools: ToolsConfig = ToolsConfig()
 
     @model_validator(mode="after")
     def _environment_matches_broker(self) -> AppConfig:

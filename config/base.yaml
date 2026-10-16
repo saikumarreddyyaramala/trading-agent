@@ -51,3 +51,7 @@ market_data:
   news_lookback_hours: 24
   max_news_articles: 50       # per collection run
   news_per_symbol: 5
+
+# Read-only research tools exposed to AI agents (MCP server and in-process).
+tools:
+  max_calls_per_session: 100  # stops a looping agent from hammering the data provider

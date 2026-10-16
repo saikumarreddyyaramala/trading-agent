@@ -10,19 +10,21 @@ from enum import Enum
 from typing import Any, Literal
 
 from alpaca.data.enums import Adjustment, DataFeed
-from alpaca.data.historical import StockHistoricalDataClient
-from alpaca.data.requests import StockBarsRequest, StockLatestQuoteRequest
+from alpaca.data.historical import ScreenerClient, StockHistoricalDataClient
+from alpaca.data.requests import MostActivesRequest, StockBarsRequest, StockLatestQuoteRequest
 from alpaca.data.timeframe import TimeFrame
 from alpaca.trading.client import TradingClient
 
 from trading_agent.data.errors import MarketDataError
-from trading_agent.domain.models import Asset, Bar, Quote
+from trading_agent.domain.models import ActiveStock, Asset, Bar, Quote
 
 QuoteFeed = Literal["iex", "sip", "delayed_sip"]
 BarsFeed = Literal["iex", "sip"]
 
 # Alpaca's free plan serves SIP history only when it is at least 15 minutes old.
 SIP_HISTORY_DELAY = timedelta(minutes=16)
+# Largest list the most-actives screener returns.
+MAX_MOST_ACTIVE = 100
 
 
 def _decimal(value: Any) -> Decimal:
@@ -49,12 +51,14 @@ class AlpacaMarketData:
         bars_feed: BarsFeed = "sip",
         data_client: Any | None = None,
         trading_client: Any | None = None,
+        screener_client: Any | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self._quote_feed = DataFeed(quote_feed)
         self._bars_feed = DataFeed(bars_feed)
         self._clock = clock or (lambda: datetime.now(UTC))
         self._data: Any = data_client or StockHistoricalDataClient(api_key, secret_key)
+        self._screener: Any = screener_client or ScreenerClient(api_key, secret_key)
         # Asset reference data lives on the trading API, which differs for paper and live.
         self._trading: Any = trading_client or TradingClient(
             api_key=api_key, secret_key=secret_key, paper=paper
@@ -133,3 +137,23 @@ class AlpacaMarketData:
             if translated:
                 result[symbol] = tuple(translated[-days:])
         return result
+
+    def get_most_active(self, limit: int) -> tuple[ActiveStock, ...]:
+        if not 1 <= limit <= MAX_MOST_ACTIVE:
+            raise ValueError(f"limit must be between 1 and {MAX_MOST_ACTIVE}")
+        try:
+            raw = self._screener.get_most_actives(MostActivesRequest(top=limit))
+        except Exception as exc:
+            raise MarketDataError(
+                f"could not fetch most active stocks: {type(exc).__name__}: {exc}"
+            ) from exc
+        stocks = [
+            ActiveStock(
+                symbol=str(item.symbol),
+                volume=int(item.volume),
+                trade_count=int(item.trade_count),
+            )
+            for item in raw.most_actives
+        ]
+        stocks.sort(key=lambda stock: stock.volume, reverse=True)
+        return tuple(stocks[:limit])

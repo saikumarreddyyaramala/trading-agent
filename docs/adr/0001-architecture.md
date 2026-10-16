@@ -57,5 +57,4 @@ real services are opt-in and never run in CI.
   interviewers ask about.
 
 ## Planned decisions
-- 0003: MCP tool design and permissions (Phase 2)
 - 0004: Workflow engine for the daily cycle (Phase 7)

@@ -89,6 +89,14 @@ class Bar(_Frozen):
     vwap: Decimal | None = None
 
 
+class ActiveStock(_Frozen):
+    """One entry of the most-active screener (today's cumulative activity)."""
+
+    symbol: str
+    volume: int
+    trade_count: int
+
+
 class NewsArticle(_Frozen):
     """A news item. Headline and summary are untrusted third-party text."""
 

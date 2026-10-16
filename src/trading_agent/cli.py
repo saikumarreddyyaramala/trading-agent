@@ -14,6 +14,7 @@ from trading_agent.bootstrap import Container
 from trading_agent.data.errors import MarketDataError
 from trading_agent.domain.models import SymbolData
 from trading_agent.health import CheckStatus, format_age, overall_ok, run_healthchecks
+from trading_agent.mcp_server.server import build_server
 from trading_agent.observability.logging import configure_logging
 from trading_agent.settings.loader import ConfigError, load_config
 from trading_agent.settings.secrets import Secrets
@@ -177,6 +178,19 @@ def market_data(
             typer.echo(f"  {symbol}: {reason}")
 
     raise typer.Exit(code=1 if snapshot.rejected else 0)
+
+
+@app.command("mcp-server")
+def mcp_server(env: EnvOption = None, config_dir: ConfigDirOption = None) -> None:
+    """Serve the read-only research tools over MCP (stdio), for an agent host to launch."""
+    container = _container(env, config_dir)
+    try:
+        tools = container.build_research_tools()
+    except ConfigError as exc:
+        typer.secho(f"Configuration error: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=2) from exc
+    # stdout is the protocol channel from here on; logs already go to stderr.
+    build_server(tools).run("stdio")
 
 
 @app.command("show-config")
