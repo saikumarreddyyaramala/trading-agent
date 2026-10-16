@@ -29,6 +29,7 @@ dev = [
     "pre-commit>=4.0",
     "pytest>=8.3",
     "pytest-cov>=6.0",
+    "pytest-github-actions-annotate-failures>=0.3",
     "ruff>=0.8",
     "types-PyYAML>=6.0",
 ]

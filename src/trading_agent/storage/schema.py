@@ -33,7 +33,11 @@ class Exact(sa.types.TypeDecorator[Decimal]):
         return str(value) if dialect.name == "sqlite" else Decimal(str(value))
 
     def process_result_value(self, value: Any, dialect: Dialect) -> Decimal | None:
-        return None if value is None else Decimal(str(value)).normalize()
+        if value is None:
+            return None
+        # Drop trailing zeros (NUMERIC pads to 9 places) without switching to exponent
+        # notation: 102.000000000 reads back as 102, never 1.02E+2.
+        return Decimal(f"{Decimal(str(value)).normalize():f}")
 
 
 JSONType = sa.JSON().with_variant(postgresql.JSONB(), "postgresql")

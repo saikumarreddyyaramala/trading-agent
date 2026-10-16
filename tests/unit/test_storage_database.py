@@ -43,7 +43,7 @@ def test_fresh_database_has_no_revision(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
-    "value", ["0.4899", "12.500000001", "100000000000.123456789", "0", "-95.09"]
+    "value", ["0.4899", "12.500000001", "99999999999.123456789", "0", "-95.09", "102"]
 )
 def test_exact_decimals_round_trip(db_engine: sa.Engine, value: str) -> None:
     table = sa.Table("exact_probe", sa.MetaData(), sa.Column("v", schema.Exact))
@@ -54,6 +54,7 @@ def test_exact_decimals_round_trip(db_engine: sa.Engine, value: str) -> None:
             stored = connection.execute(sa.select(table.c.v)).scalar_one()
         assert stored == Decimal(value)
         assert isinstance(stored, Decimal)
+        assert "E" not in str(stored)  # never scientific notation
     finally:
         table.drop(db_engine)
 
@@ -80,3 +81,18 @@ def test_sqlite_parent_folder_is_created(tmp_path: Path) -> None:
 def test_url_with_percent_sign_survives_config() -> None:
     config = alembic_config(url="postgresql://u:p%40ss@h/d")
     assert config.get_main_option("sqlalchemy.url") == "postgresql+psycopg://u:p%40ss@h/d"
+
+
+def test_values_beyond_the_column_precision_are_rejected_on_postgresql(
+    db_engine: sa.Engine,
+) -> None:
+    """NUMERIC(20, 9) holds 11 integer digits. PostgreSQL refuses more rather than rounding."""
+    if db_engine.dialect.name != "postgresql":
+        pytest.skip("SQLite stores exact decimals as text and has no precision limit")
+    table = sa.Table("exact_overflow", sa.MetaData(), sa.Column("v", schema.Exact))
+    table.create(db_engine)
+    try:
+        with pytest.raises(sa.exc.DataError), db_engine.begin() as connection:
+            connection.execute(table.insert().values(v=Decimal("100000000000.1")))
+    finally:
+        table.drop(db_engine)

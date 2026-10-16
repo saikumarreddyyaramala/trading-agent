@@ -298,10 +298,12 @@ class SqlAuditStore:
         return self._read("runs", read)
 
     def get_run(self, run_id: str) -> dict[str, Any] | None:
-        """Everything recorded for one run, as plain JSON-ready data."""
+        """Everything recorded for one run, as plain data (decimals, datetimes, JSON)."""
 
-        def rows(connection: sa.Connection, table: sa.Table, order_by: Any) -> list[dict[str, Any]]:
-            query = sa.select(table).where(table.c.run_id == run_id).order_by(order_by)
+        def rows(
+            connection: sa.Connection, table: sa.Table, *order_by: Any
+        ) -> list[dict[str, Any]]:
+            query = sa.select(table).where(table.c.run_id == run_id).order_by(*order_by)
             return [dict(row) for row in connection.execute(query).mappings()]
 
         def read(connection: sa.Connection) -> dict[str, Any] | None:
@@ -320,7 +322,14 @@ class SqlAuditStore:
                 "risk_decisions": rows(
                     connection, schema.risk_decisions, schema.risk_decisions.c.id
                 ),
-                "orders": rows(connection, schema.orders, schema.orders.c.recorded_at),
+                # Orders recorded in one batch share a timestamp; break ties deterministically.
+                "orders": rows(
+                    connection,
+                    schema.orders,
+                    schema.orders.c.recorded_at,
+                    schema.orders.c.submitted_at,
+                    schema.orders.c.client_order_id,
+                ),
                 "position_events": rows(
                     connection, schema.position_events, schema.position_events.c.id
                 ),

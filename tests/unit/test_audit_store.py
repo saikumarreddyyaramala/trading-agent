@@ -233,7 +233,8 @@ def test_orders_are_linked_and_updated_in_place(db_engine: sa.Engine) -> None:
 
     report = store.get_run("r1")
     assert report is not None
-    entry, stop = report["orders"]
+    orders = {o["role"]: o for o in report["orders"]}
+    entry, stop = orders["entry"], orders["stop"]
     assert (entry["role"], entry["status"], entry["filled_avg_price"]) == (
         "entry",
         "filled",
@@ -347,3 +348,21 @@ def test_naive_timestamps_are_read_as_utc(db_engine: sa.Engine) -> None:
     store = _store(db_engine)
     store.start_run("r1", "analyze")
     assert store.list_runs(1)[0].started_at.utcoffset() == UTC.utcoffset(None)
+
+
+def test_orders_in_one_batch_come_back_in_a_stable_order(db_engine: sa.Engine) -> None:
+    store = _store(db_engine)
+    store.start_run("r1", "manual_buy")
+    store.record_orders("r1", [_order("ta-r1-stop", side="sell"), _order("ta-r1-entry")])
+    report = store.get_run("r1")
+    assert report is not None
+    assert [o["client_order_id"] for o in report["orders"]] == ["ta-r1-entry", "ta-r1-stop"]
+
+
+def test_prices_read_back_without_exponents(db_engine: sa.Engine) -> None:
+    store = _store(db_engine)
+    store.start_run("r1", "manual_buy")
+    store.record_orders("r1", [_order(filled_avg_price=Decimal("102.000000000"))])
+    report = store.get_run("r1")
+    assert report is not None
+    assert str(report["orders"][0]["filled_avg_price"]) == "102"
