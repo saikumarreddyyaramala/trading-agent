@@ -19,6 +19,7 @@ from trading_agent.domain.models import (
     ActiveStock,
     Asset,
     Bar,
+    BrokerOrder,
     LLMRequest,
     LLMResponse,
     LLMUsage,
@@ -322,3 +323,143 @@ class FakeNews:
         if self.fail:
             raise MarketDataError("could not fetch news: down")
         return self.articles[:limit]
+
+
+# ---------- Simulated order execution ----------
+
+
+class FakeTime:
+    """A clock whose `sleep` advances time instantly, for polling loops."""
+
+    def __init__(self, start: datetime = NOW) -> None:
+        self.now = start
+        self.slept = 0.0
+
+    def clock(self) -> datetime:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.slept += seconds
+        self.now += timedelta(seconds=seconds)
+
+
+class FakeOrders:
+    """In-memory `OrderExecutionPort` that simulates how an entry order fills.
+
+    fill: "instant" (filled on submit), "full" (filled on the first poll), "partial" (half
+    fills, the rest never does), "none" (never fills), "late" (fills while being cancelled).
+    """
+
+    def __init__(
+        self,
+        fill: str = "full",
+        *,
+        reject_entry: bool = False,
+        reject_stop: bool = False,
+        fail_close: bool = False,
+        sticky_cancel: bool = False,
+        fail_polls: int = 0,
+    ) -> None:
+        self.fill = fill
+        self.reject_entry = reject_entry
+        self.reject_stop = reject_stop
+        self.fail_close = fail_close
+        self.sticky_cancel = sticky_cancel
+        self.fail_polls = fail_polls
+        self.orders: dict[str, BrokerOrder] = {}
+        self.log: list[tuple[str, str]] = []  # (action, detail), in call order
+
+    def _new(
+        self, client_id: str, symbol: str, side: str, kind: str, qty: Decimal, **px: Any
+    ) -> BrokerOrder:
+        order = BrokerOrder(
+            id=f"id-{client_id}",
+            client_order_id=client_id,
+            symbol=symbol,
+            side=side,  # type: ignore[arg-type]
+            order_type=kind,
+            status="new",
+            quantity=qty,
+            filled_quantity=Decimal("0"),
+            submitted_at=NOW,
+            **px,
+        )
+        self.orders[client_id] = order
+        return order
+
+    def _update(self, client_id: str, **changes: Any) -> BrokerOrder:
+        self.orders[client_id] = self.orders[client_id].model_copy(update=changes)
+        return self.orders[client_id]
+
+    def _filled(
+        self, order: BrokerOrder, qty: Decimal | None = None, status: str = "filled"
+    ) -> BrokerOrder:
+        price = (order.limit_price or Decimal("100")) - Decimal("0.05")
+        return self._update(
+            order.client_order_id,
+            status=status,
+            filled_quantity=order.quantity if qty is None else qty,
+            filled_avg_price=price,
+        )
+
+    def submit_limit_buy(
+        self, symbol: str, quantity: Decimal, limit_price: Decimal, client_order_id: str
+    ) -> BrokerOrder:
+        self.log.append(("buy", f"{quantity} {symbol} @ {limit_price} [{client_order_id}]"))
+        if self.reject_entry:
+            raise RuntimeError("insufficient buying power")
+        order = self._new(
+            client_order_id, symbol, "buy", "limit", quantity, limit_price=limit_price
+        )
+        return self._filled(order) if self.fill == "instant" else order
+
+    def submit_stop_sell(
+        self, symbol: str, quantity: Decimal, stop_price: Decimal, client_order_id: str
+    ) -> BrokerOrder:
+        self.log.append(("stop", f"{quantity} {symbol} @ {stop_price} [{client_order_id}]"))
+        if self.reject_stop:
+            raise RuntimeError("stop rejected")
+        return self._new(client_order_id, symbol, "sell", "stop", quantity, stop_price=stop_price)
+
+    def get_order(self, client_order_id: str) -> BrokerOrder | None:
+        if self.fail_polls > 0 and client_order_id in self.orders:
+            self.fail_polls -= 1
+            raise RuntimeError("timeout")
+        order = self.orders.get(client_order_id)
+        if order is None or order.side != "buy" or order.is_terminal:
+            return order
+        if self.fill == "full":
+            return self._filled(order)
+        if self.fill == "partial" and order.status == "new":
+            return self._filled(order, order.quantity / 2, status="partially_filled")
+        return order
+
+    def get_open_orders(self, symbol: str | None = None) -> tuple[BrokerOrder, ...]:
+        return tuple(
+            o
+            for o in self.orders.values()
+            if (not o.is_terminal or (self.sticky_cancel and o.status == "canceled"))
+            and (symbol is None or o.symbol == symbol)
+        )
+
+    def cancel_order(self, order_id: str) -> None:
+        order = next(o for o in self.orders.values() if o.id == order_id)
+        self.log.append(("cancel", order.client_order_id))
+        if order.is_terminal:
+            return
+        if order.side == "buy" and self.fill == "late":
+            self._filled(order)
+        else:
+            self._update(order.client_order_id, status="canceled")
+
+    def close_position(self, symbol: str) -> BrokerOrder:
+        self.log.append(("close", symbol))
+        if self.fail_close:
+            raise RuntimeError("market closed")
+        order = self._new(f"close-{symbol}-{len(self.log)}", symbol, "sell", "market", Decimal("1"))
+        return self._update(order.client_order_id, status="filled", filled_quantity=Decimal("1"))
+
+
+def make_position(symbol: str = "AAPL", quantity: str = "0.4899", avg: str = "100") -> Position:
+    qty, price = Decimal(quantity), Decimal(avg)
+    return Position(symbol=symbol, quantity=qty, market_value=qty * price, avg_entry_price=price)

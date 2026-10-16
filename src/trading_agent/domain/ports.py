@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from datetime import datetime
+from decimal import Decimal
 from typing import Protocol, runtime_checkable
 
 from trading_agent.domain.models import (
@@ -16,6 +17,7 @@ from trading_agent.domain.models import (
     ActiveStock,
     Asset,
     Bar,
+    BrokerOrder,
     LLMRequest,
     LLMResponse,
     MarketClock,
@@ -79,4 +81,34 @@ class NewsPort(Protocol):
         self, symbols: Sequence[str], *, since: datetime, limit: int
     ) -> tuple[NewsArticle, ...]:
         """Articles newer than `since`, newest first. An empty `symbols` means all news."""
+        ...
+
+
+@runtime_checkable
+class OrderExecutionPort(Protocol):
+    """The only way to change broker state. Deliberately separate from `BrokerPort`:
+    research tools and agents are built from read-only ports and never receive this one.
+
+    Every order carries a caller-chosen `client_order_id`, which the broker enforces as
+    unique, so retrying a submission can never create a second order.
+    """
+
+    def submit_limit_buy(
+        self, symbol: str, quantity: Decimal, limit_price: Decimal, client_order_id: str
+    ) -> BrokerOrder: ...
+
+    def submit_stop_sell(
+        self, symbol: str, quantity: Decimal, stop_price: Decimal, client_order_id: str
+    ) -> BrokerOrder: ...
+
+    def get_order(self, client_order_id: str) -> BrokerOrder | None:
+        """The order with this client id, or None if it was never submitted."""
+        ...
+
+    def get_open_orders(self, symbol: str | None = None) -> tuple[BrokerOrder, ...]: ...
+
+    def cancel_order(self, order_id: str) -> None: ...
+
+    def close_position(self, symbol: str) -> BrokerOrder:
+        """Sell the whole position at market."""
         ...

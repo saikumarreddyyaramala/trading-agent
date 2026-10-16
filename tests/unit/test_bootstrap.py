@@ -9,6 +9,7 @@ from trading_agent.agents import AnalystAgent
 from trading_agent.bootstrap import Container
 from trading_agent.data import AlpacaMarketData, AlpacaNews, MarketDataCollector
 from trading_agent.execution import AlpacaBroker
+from trading_agent.execution.executor import ExecutionDisabledError, Executor
 from trading_agent.llm import LLMGateway
 from trading_agent.mcp_server import ResearchTools
 from trading_agent.risk import RiskEngine
@@ -120,3 +121,24 @@ def test_risk_engine_needs_broker_keys(config_dir: Path) -> None:
     )
     with pytest.raises(ConfigError, match="ALPACA_SECRET_KEY"):
         container.build_risk_engine()
+
+
+def test_builds_paper_executor(config_dir: Path) -> None:
+    container = Container(config=load_config("paper", config_dir), secrets=make_secrets())
+    assert isinstance(container.build_executor(), Executor)
+
+
+def test_live_executor_is_refused_even_when_confirmed(config_dir: Path) -> None:
+    container = Container(
+        config=load_config("live", config_dir), secrets=make_secrets(live_trading_confirmed=True)
+    )
+    with pytest.raises(ExecutionDisabledError, match="paper-only"):
+        container.build_executor()
+
+
+def test_executor_needs_broker_keys(config_dir: Path) -> None:
+    container = Container(
+        config=load_config("paper", config_dir), secrets=make_secrets(alpaca_api_key=None)
+    )
+    with pytest.raises(ConfigError, match="ALPACA_API_KEY"):
+        container.build_executor()

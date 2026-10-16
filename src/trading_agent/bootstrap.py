@@ -14,6 +14,8 @@ from trading_agent.data.alpaca_news import AlpacaNews
 from trading_agent.data.collector import MarketDataCollector
 from trading_agent.domain.ports import BrokerPort, LLMProviderPort, MarketDataPort, NewsPort
 from trading_agent.execution.alpaca_broker import AlpacaBroker
+from trading_agent.execution.alpaca_orders import AlpacaOrderExecutor
+from trading_agent.execution.executor import Executor
 from trading_agent.llm.anthropic_provider import AnthropicProvider
 from trading_agent.llm.gateway import LLMGateway
 from trading_agent.llm.openai_provider import OpenAIProvider
@@ -102,6 +104,16 @@ class Container:
             self.config,
             live_trading_confirmed=self.secrets.live_trading_confirmed,
         )
+
+    def build_executor(self) -> Executor:
+        """Order execution. Raises `ExecutionDisabledError` for a live configuration."""
+        self._require("broker", BROKER_SECRET_FIELDS[self.config.broker.provider])
+        orders = AlpacaOrderExecutor(
+            self.secrets.require("alpaca_api_key"),
+            self.secrets.require("alpaca_secret_key"),
+            paper=self.config.broker.paper,
+        )
+        return Executor(orders, self.build_broker(), self.build_market_data(), self.config)
 
     def build_llm_gateway(self) -> LLMGateway:
         llm = self.config.llm

@@ -13,8 +13,11 @@ from tests.conftest import (
     FakeBroker,
     FakeMarketData,
     FakeNews,
+    FakeOrders,
+    FakeTime,
     healthy_market_data,
     make_article,
+    make_position,
     make_quote,
 )
 from trading_agent import __version__, cli
@@ -22,6 +25,7 @@ from trading_agent.agents.analyst import AnalystResult, ToolCallRecord
 from trading_agent.bootstrap import Container
 from trading_agent.data import MarketDataCollector
 from trading_agent.domain.models import Evidence, LLMUsage, RiskDecision, TradeProposal
+from trading_agent.execution.executor import Executor
 from trading_agent.risk import RiskEngine
 from trading_agent.settings.models import AppConfig
 
@@ -317,7 +321,7 @@ def test_risk_check_approves(config_dir: Path, monkeypatch: pytest.MonkeyPatch) 
     assert "PASS  Liquidity" in result.output
     assert "APPROVED" in result.output
     assert "Buy 0.4899 AAPL (~$49.03), limit $102.05, stop $95.09, target $110.11" in result.output
-    assert "No order was placed" in result.output
+    assert "The risk check itself places no order." in result.output
     assert seen[0].symbol == "AAPL"
 
 
@@ -360,3 +364,140 @@ def test_risk_check_without_keys_exits_2(config_dir: Path) -> None:
     )
     assert result.exit_code == 2
     assert "missing broker credentials" in result.output
+
+
+# ---------- buy / manage / flatten ----------
+
+
+def _use_fake_executor(
+    monkeypatch: pytest.MonkeyPatch, orders: FakeOrders, broker: FakeBroker | None = None
+) -> FakeOrders:
+    time = FakeTime()
+    executor = Executor(
+        orders,
+        broker or FakeBroker(),
+        healthy_market_data("AAPL"),
+        AppConfig(),
+        clock=time.clock,
+        sleep=time.sleep,
+    )
+    monkeypatch.setattr(Container, "build_executor", lambda self: executor)
+    return orders
+
+
+def test_buy_requires_confirm(config_dir: Path) -> None:
+    result = runner.invoke(
+        cli.app, ["buy", "AAPL", "--price", "100.05", "--config-dir", str(config_dir)]
+    )
+    assert result.exit_code == 2
+    assert "Refusing without --confirm" in result.output
+
+
+def test_buy_enters_with_a_stop(config_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _use_fake_risk(monkeypatch, FakeBroker())
+    orders = _use_fake_executor(monkeypatch, FakeOrders("instant"))
+    result = runner.invoke(
+        cli.app, ["buy", "AAPL", "--price", "100.05", "--confirm", "--config-dir", str(config_dir)]
+    )
+    assert result.exit_code == 0, result.output
+    assert "APPROVED" in result.output
+    assert "ENTERED  filled and protected by a stop-loss" in result.output
+    assert "Stop   new: sell 0.4899 AAPL at $95.09" in result.output
+    assert [action for action, _ in orders.log] == ["buy", "stop"]
+    assert orders.log[0][1].split("[")[1].startswith("ta-manual-")
+
+
+def test_buy_rejected_by_risk_places_nothing(
+    config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _use_fake_risk(monkeypatch, FakeBroker(market_open=False))
+    orders = _use_fake_executor(monkeypatch, FakeOrders())
+    result = runner.invoke(
+        cli.app, ["buy", "AAPL", "--price", "100.05", "--confirm", "--config-dir", str(config_dir)]
+    )
+    assert result.exit_code == 1
+    assert "REJECTED" in result.output
+    assert orders.log == []
+
+
+def test_buy_that_does_not_fill_exits_1(config_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _use_fake_risk(monkeypatch, FakeBroker())
+    _use_fake_executor(monkeypatch, FakeOrders("none"))
+    result = runner.invoke(
+        cli.app, ["buy", "AAPL", "--price", "100.05", "--confirm", "--config-dir", str(config_dir)]
+    )
+    assert result.exit_code == 1
+    assert "NOT_FILLED" in result.output
+
+
+def test_buy_bad_price_exits_2(config_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _use_fake_executor(monkeypatch, FakeOrders())
+    result = runner.invoke(
+        cli.app, ["buy", "AAPL", "--price", "abc", "--confirm", "--config-dir", str(config_dir)]
+    )
+    assert result.exit_code == 2
+
+
+def test_buy_is_refused_for_live_config(config_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ALPACA_API_KEY", "k")
+    monkeypatch.setenv("ALPACA_SECRET_KEY", "s")
+    monkeypatch.setenv("LIVE_TRADING_CONFIRMED", "true")
+    result = runner.invoke(
+        cli.app,
+        [
+            "buy",
+            "AAPL",
+            "--price",
+            "100",
+            "--confirm",
+            "--env",
+            "live",
+            "--config-dir",
+            str(config_dir),
+        ],
+    )
+    assert result.exit_code == 2
+    assert "paper-only until Phase 11" in result.output
+
+
+def test_manage_pass(config_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    broker = FakeBroker(positions=(make_position("AAPL", "0.4899", "100"),))
+    orders = _use_fake_executor(monkeypatch, FakeOrders(), broker)
+    result = runner.invoke(cli.app, ["manage", "--config-dir", str(config_dir)])
+    assert result.exit_code == 0, result.output
+    assert "STOP_RESTORED  AAPL   placed missing stop at $95.00" in result.output
+    assert orders.log[0][0] == "stop"
+
+
+def test_manage_error_exits_1(config_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _use_fake_executor(monkeypatch, FakeOrders(), FakeBroker(fail_positions=True))
+    result = runner.invoke(cli.app, ["manage", "--config-dir", str(config_dir)])
+    assert result.exit_code == 1
+    assert "ERROR" in result.output
+
+
+def test_flatten_requires_confirm(config_dir: Path) -> None:
+    result = runner.invoke(cli.app, ["flatten", "--config-dir", str(config_dir)])
+    assert result.exit_code == 2
+
+
+def test_flatten(config_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    broker = FakeBroker(positions=(make_position("AAPL"),))
+    orders = _use_fake_executor(monkeypatch, FakeOrders(), broker)
+    result = runner.invoke(cli.app, ["flatten", "--confirm", "--config-dir", str(config_dir)])
+    assert result.exit_code == 0, result.output
+    assert "FLATTENED" in result.output
+    assert orders.log == [("close", "AAPL")]
+
+
+def test_flatten_failure_exits_1(config_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    broker = FakeBroker(positions=(make_position("AAPL"),))
+    _use_fake_executor(monkeypatch, FakeOrders(fail_close=True), broker)
+    result = runner.invoke(cli.app, ["flatten", "--confirm", "--config-dir", str(config_dir)])
+    assert result.exit_code == 1
+
+
+def test_execution_commands_without_keys_exit_2(config_dir: Path) -> None:
+    result = runner.invoke(cli.app, ["manage", "--config-dir", str(config_dir)])
+    assert result.exit_code == 2
+    assert "Execution unavailable" in result.output

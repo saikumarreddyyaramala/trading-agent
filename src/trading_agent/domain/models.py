@@ -311,3 +311,45 @@ class RiskDecision(_Frozen):
         if not self.approved and self.plan is not None:
             raise ValueError("a rejected decision cannot carry an order plan")
         return self
+
+
+# ---------- Orders ----------
+
+# Statuses after which an order can no longer fill.
+TERMINAL_ORDER_STATUSES = frozenset(
+    {
+        "filled",
+        "canceled",
+        "expired",
+        "rejected",
+        "replaced",
+        "done_for_day",
+        "stopped",
+        "suspended",
+    }
+)
+
+
+class BrokerOrder(_Frozen):
+    """An order as the broker reports it, in vendor-neutral form."""
+
+    id: str
+    client_order_id: str
+    symbol: str
+    side: Literal["buy", "sell"]
+    order_type: str
+    status: str
+    quantity: Decimal
+    filled_quantity: Decimal
+    filled_avg_price: Decimal | None = None
+    limit_price: Decimal | None = None
+    stop_price: Decimal | None = None
+    submitted_at: datetime | None = None
+
+    @property
+    def is_terminal(self) -> bool:
+        return self.status in TERMINAL_ORDER_STATUSES
+
+    @property
+    def is_filled(self) -> bool:
+        return self.status == "filled"

@@ -1,5 +1,5 @@
 .DEFAULT_GOAL := help
-.PHONY: help install lint format typecheck test test-integration check healthcheck docker-build docker-healthcheck
+.PHONY: help install lint format typecheck test test-integration test-paper-orders check healthcheck docker-build docker-healthcheck
 
 help: ## Show available commands
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-20s %s\n", $$1, $$2}'
@@ -24,6 +24,9 @@ test: ## Unit tests with coverage (no network, no keys)
 
 test-integration: ## Tests against real Alpaca paper + LLM (needs .env)
 	uv run pytest -m integration -v
+
+test-paper-orders: ## Round-trip a real order on the PAPER account (market hours)
+	RUN_PAPER_ORDERS=1 uv run pytest -m paper_orders -v -s
 
 check: lint typecheck test ## Everything CI runs
 

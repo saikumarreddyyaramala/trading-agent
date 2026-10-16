@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import sys
+import uuid
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -173,3 +174,45 @@ def test_analyst_end_to_end() -> None:
     print(result.model_dump_json(indent=2))  # visible with -s, for a human to judge the reasoning
     assert result.status in {"proposed", "no_trade"}, result.reason
     assert result.tool_calls, "the analyst should research before answering"
+
+
+@pytest.mark.paper_orders
+@pytest.mark.skipif(
+    os.environ.get("RUN_PAPER_ORDERS") != "1",
+    reason="places real orders on the paper account; set RUN_PAPER_ORDERS=1 to run",
+)
+def test_paper_round_trip() -> None:
+    """Risk-approved entry on PAPER, protective stop on, then flatten. Needs market hours."""
+    container = _require("alpaca_api_key", "alpaca_secret_key")
+    assert container.config.broker.paper, "this test only ever runs against paper"
+    symbol = "F"
+    quote = container.build_market_data().get_latest_quotes([symbol])[symbol]
+    proposal = TradeProposal(
+        decision="buy",
+        symbol=symbol,
+        thesis="integration test round trip",
+        reference_price=quote.ask_price,
+        confidence="low",
+        evidence=(
+            Evidence(claim="x", source_call_id="t"),
+            Evidence(claim="y", source_call_id="t"),
+        ),
+        risks=("test",),
+    )
+    decision = container.build_risk_engine().evaluate(proposal)
+    if not decision.approved:
+        pytest.skip(
+            f"risk engine rejected the test trade: {[c.name for c in decision.failed_checks]}"
+        )
+
+    executor = container.build_executor()
+    try:
+        result = executor.enter(decision, f"itest-{uuid.uuid4().hex[:8]}")
+        print(result.model_dump_json(indent=2))
+        assert result.status == "entered", result.reason
+        assert result.stop_order is not None
+        assert result.stop_order.status in {"new", "accepted", "pending_new"}
+    finally:
+        flattened = executor.flatten()
+        print(flattened.model_dump_json(indent=2))
+    assert flattened.action == "flattened", flattened.detail

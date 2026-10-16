@@ -16,8 +16,8 @@ risk engine, executes on a broker, and reports the result against the S&P 500.
 | 2 | MCP server: 7 read-only research tools, input bounds, call budget, audit log | Done |
 | 3 | Analyst agent: tool-calling research over MCP, evidence-verified proposals | Done |
 | 4 | Risk engine: 15 code-enforced checks, cash-only sizing, eligible-only candidates | Done |
-| 5 | Order execution (paper) | Next |
-| 6 | PostgreSQL audit trail | Planned |
+| 5 | Order execution (paper): idempotent entries, broker-side stops, managed exits | Done |
+| 6 | PostgreSQL audit trail | Next |
 | 7 | Orchestration and scheduling | Planned |
 | 8 | Daily report | Planned |
 | 9 | Critic agent | Planned |
@@ -44,7 +44,7 @@ risk engine, executes on a broker, and reports the result against the S&P 500.
 
 Key rules (see [ADR 0001](docs/adr/0001-architecture.md), [ADR 0002](docs/adr/0002-market-data.md),
 [ADR 0003](docs/adr/0003-mcp-tools.md), [ADR 0004](docs/adr/0004-analyst-agent.md),
-and [ADR 0005](docs/adr/0005-risk-engine.md)):
+[ADR 0005](docs/adr/0005-risk-engine.md), and [ADR 0006](docs/adr/0006-order-execution.md)):
 - The AI has read-only tools; it can never place an order directly. Tool inputs are
   validated and bounded, and each session has a call budget.
 - Every model call goes through the LLM gateway (pinned model, fallback, token caps, logs).
@@ -54,6 +54,9 @@ and [ADR 0005](docs/adr/0005-risk-engine.md)):
 - Any failed or erroring check means "no trade". The risk engine runs 15 checks with its
   own fresh data and sizes positions from cash only (no margin); an approval cannot exist
   without an order plan.
+- Orders go through a separate write port that agents never receive. Execution is
+  paper-only until Phase 11, every entry gets a broker-side stop immediately, and retries
+  cannot double-submit.
 - Market data must pass quality and freshness rules; a symbol with bad data is rejected.
 
 ## Quick start
@@ -99,6 +102,10 @@ Ready
 | `uv run trading-agent market-data AAPL MSFT` | Quotes, daily bars, and news for symbols (`--fresh` enforces quote freshness, `--json` for machines) |
 | `uv run trading-agent analyze` | Run the analyst: research and propose one trade or none (uses LLM tokens, never trades) |
 | `uv run trading-agent risk-check AAPL --price 230` | Run every risk rule on a hypothetical buy with live data (never trades) |
+| `uv run trading-agent buy AAPL --price 230 --confirm` | Risk-check and, if approved, enter on the PAPER account with a stop-loss |
+| `uv run trading-agent manage` | One exit pass: force-close, take profit, keep a stop on every position |
+| `uv run trading-agent flatten --confirm` | Emergency: cancel all orders, close all positions |
+| `make test-paper-orders` | Round-trip a real order on the PAPER account (market hours) |
 | `uv run trading-agent mcp-server` | Serve the read-only research tools over MCP (stdio) |
 | `uv run trading-agent show-config` | Print the effective config (never secrets) |
 
@@ -111,7 +118,7 @@ src/trading_agent/
   settings/              typed config loader and secrets
   observability/         structured logging with secret redaction
   llm/                   LLM gateway + OpenAI and Anthropic adapters
-  execution/             Alpaca adapter (orders in Phase 5)
+  execution/             read-only broker adapter, order adapter, executor (paper)
   data/                  market data + news adapters, quality/freshness rules, collector
   mcp_server/            read-only research tools + MCP server (stdio)
   agents/                analyst agent: prompts, tool-calling loop, evidence checks

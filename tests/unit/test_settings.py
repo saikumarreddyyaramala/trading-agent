@@ -137,6 +137,28 @@ def test_invalid_risk_additions_are_rejected(override: dict[str, object]) -> Non
         AppConfig.model_validate({"risk": override})
 
 
+def test_repo_config_execution(config_dir: Path) -> None:
+    execution = load_config("paper", config_dir).execution
+    assert execution.entry_timeout_seconds == 120
+    assert execution.poll_interval_seconds == 2
+    assert execution.max_decision_age_seconds == 60
+    assert execution.cancel_timeout_seconds == 30
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        {"entry_timeout_seconds": 1},
+        {"poll_interval_seconds": 0},
+        {"max_decision_age_seconds": 601},
+        {"cancel_timeout_seconds": 4},
+    ],
+)
+def test_invalid_execution_settings_are_rejected(override: dict[str, object]) -> None:
+    with pytest.raises(ValueError, match="execution"):
+        AppConfig.model_validate({"execution": override})
+
+
 def test_repo_config_tool_budget(config_dir: Path) -> None:
     assert load_config("paper", config_dir).tools.max_calls_per_session == 100
 

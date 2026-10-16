@@ -126,6 +126,18 @@ class AnalystConfig(_Strict):
     repair_attempts: int = Field(default=1, ge=0, le=3)
 
 
+class ExecutionConfig(_Strict):
+    """Order handling. Exits are managed in code because Alpaca has no OCO for fractional."""
+
+    # How long an entry limit order may rest before the unfilled part is cancelled.
+    entry_timeout_seconds: int = Field(default=120, ge=5, le=900)
+    poll_interval_seconds: float = Field(default=2, gt=0, le=30)
+    # An approval older than this is stale: prices may have moved since the checks ran.
+    max_decision_age_seconds: int = Field(default=60, ge=5, le=600)
+    # How long to wait for cancellations to settle before closing a position.
+    cancel_timeout_seconds: int = Field(default=30, ge=5, le=300)
+
+
 class AppConfig(_Strict):
     environment: Environment = Environment.PAPER
     kill_switch: bool = False
@@ -136,6 +148,7 @@ class AppConfig(_Strict):
     market_data: MarketDataConfig = MarketDataConfig()
     tools: ToolsConfig = ToolsConfig()
     analyst: AnalystConfig = AnalystConfig()
+    execution: ExecutionConfig = ExecutionConfig()
 
     @model_validator(mode="after")
     def _environment_matches_broker(self) -> AppConfig:

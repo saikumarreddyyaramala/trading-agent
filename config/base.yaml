@@ -66,3 +66,11 @@ analyst:
   max_tool_calls_per_turn: 8
   max_total_tokens: 300000    # cost ceiling per run (input + output)
   repair_attempts: 1          # chances to fix an answer that fails the evidence checks
+
+# Order execution (paper only until Phase 11). Exits are managed in code: a protective stop
+# goes on right after the entry fills; take-profit and the force-close run in `manage`.
+execution:
+  entry_timeout_seconds: 120  # unfilled part of the entry limit order is cancelled after this
+  poll_interval_seconds: 2
+  max_decision_age_seconds: 60  # a risk approval older than this is refused as stale
+  cancel_timeout_seconds: 30

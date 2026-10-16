@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import uuid
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -16,6 +17,11 @@ from trading_agent.agents.analyst import AnalystResult
 from trading_agent.bootstrap import Container
 from trading_agent.data.errors import MarketDataError
 from trading_agent.domain.models import Evidence, RiskDecision, SymbolData, TradeProposal
+from trading_agent.execution.executor import (
+    EntryResult,
+    ExecutionDisabledError,
+    ManageResult,
+)
 from trading_agent.health import CheckStatus, format_age, overall_ok, run_healthchecks
 from trading_agent.mcp_server.server import build_server
 from trading_agent.observability.logging import configure_logging
@@ -255,7 +261,7 @@ def _print_risk(decision: RiskDecision) -> None:
         )
     else:
         typer.secho("\nREJECTED", fg=typer.colors.RED, bold=True)
-    typer.echo("No order was placed. Execution arrives in Phase 5.")
+    typer.echo("The risk check itself places no order.")
 
 
 @app.command("risk-check")
@@ -271,19 +277,7 @@ def risk_check(
     """Run every risk rule on a hypothetical buy, with live data. Never places an order."""
     container = _container(env, config_dir)
     try:
-        reference = Decimal(price)
-        proposal = TradeProposal(
-            decision="buy",
-            symbol=symbol,
-            thesis="Manual risk check from the command line.",
-            reference_price=reference,
-            confidence="low",
-            evidence=(
-                Evidence(claim="Manual check", source_call_id="cli"),
-                Evidence(claim="Manual check", source_call_id="cli"),
-            ),
-            risks=("Manual check",),
-        )
+        proposal = _manual_proposal(symbol, price)
         engine = container.build_risk_engine()
     except (InvalidOperation, ValueError) as exc:
         typer.secho(f"Error: invalid input: {exc}", fg=typer.colors.RED, err=True)
@@ -298,6 +292,117 @@ def risk_check(
     else:
         _print_risk(decision)
     raise typer.Exit(code=0 if decision.approved else 1)
+
+
+ConfirmOption = Annotated[
+    bool, typer.Option("--confirm", help="Required: this places real orders on the paper account.")
+]
+
+
+def _manual_proposal(symbol: str, price: str) -> TradeProposal:
+    return TradeProposal(
+        decision="buy",
+        symbol=symbol,
+        thesis="Manual order from the command line.",
+        reference_price=Decimal(price),
+        confidence="low",
+        evidence=(
+            Evidence(claim="Manual", source_call_id="cli"),
+            Evidence(claim="Manual", source_call_id="cli"),
+        ),
+        risks=("Manual",),
+    )
+
+
+def _print_entry(result: EntryResult) -> None:
+    color = typer.colors.GREEN if result.status == "entered" else typer.colors.RED
+    typer.secho(result.status.upper(), fg=color, bold=True, nl=False)
+    typer.echo(f"  {result.reason}")
+    if result.entry_order is not None:
+        order = result.entry_order
+        typer.echo(
+            f"Entry  {order.status}: {order.filled_quantity}/{order.quantity} {order.symbol} "
+            f"at avg ${order.filled_avg_price or '-'} (limit ${order.limit_price})"
+        )
+    if result.stop_order is not None:
+        stop = result.stop_order
+        typer.echo(
+            f"Stop   {stop.status}: sell {stop.quantity} {stop.symbol} at ${stop.stop_price}"
+        )
+
+
+def _print_manage(results: tuple[ManageResult, ...]) -> None:
+    for result in results:
+        color = typer.colors.RED if result.action == "error" else typer.colors.GREEN
+        typer.secho(f"{result.action.upper():<14}", fg=color, nl=False)
+        typer.echo(f" {result.symbol or '':<6} {result.detail}")
+
+
+def _executor_or_exit(container: Container) -> Any:
+    try:
+        return container.build_executor()
+    except (ConfigError, ExecutionDisabledError) as exc:
+        typer.secho(f"Execution unavailable: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=2) from exc
+
+
+@app.command()
+def buy(
+    symbol: Annotated[str, typer.Argument(help="Ticker to buy, e.g. AAPL.")],
+    price: Annotated[str, typer.Option("--price", help="Reference price for the risk checks.")],
+    confirm: ConfirmOption = False,
+    env: EnvOption = None,
+    config_dir: ConfigDirOption = None,
+) -> None:
+    """Risk-check a buy and, if approved, enter it on the PAPER account with a stop-loss."""
+    if not confirm:
+        typer.secho(
+            "Refusing without --confirm: this places orders on the paper account. "
+            "Use `risk-check` for a dry run.",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(code=2)
+    container = _container(env, config_dir)
+    executor = _executor_or_exit(container)
+    try:
+        proposal = _manual_proposal(symbol, price)
+        engine = container.build_risk_engine()
+    except (InvalidOperation, ValueError) as exc:
+        typer.secho(f"Error: invalid input: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=2) from exc
+
+    decision = engine.evaluate(proposal)
+    _print_risk(decision)
+    if not decision.approved:
+        raise typer.Exit(code=1)
+    typer.echo("")
+    result = executor.enter(decision, f"manual-{uuid.uuid4().hex[:10]}")
+    _print_entry(result)
+    raise typer.Exit(code=0 if result.status == "entered" else 1)
+
+
+@app.command()
+def manage(env: EnvOption = None, config_dir: ConfigDirOption = None) -> None:
+    """One exit-management pass: force-close, take profit, and keep a stop on every position."""
+    container = _container(env, config_dir)
+    results = _executor_or_exit(container).manage()
+    _print_manage(results)
+    raise typer.Exit(code=1 if any(r.action == "error" for r in results) else 0)
+
+
+@app.command()
+def flatten(
+    confirm: ConfirmOption = False, env: EnvOption = None, config_dir: ConfigDirOption = None
+) -> None:
+    """Emergency exit: cancel every open order and close every position (paper)."""
+    if not confirm:
+        typer.secho("Refusing without --confirm.", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=2)
+    container = _container(env, config_dir)
+    result = _executor_or_exit(container).flatten()
+    _print_manage((result,))
+    raise typer.Exit(code=1 if result.action == "error" else 0)
 
 
 @app.command("mcp-server")
