@@ -316,3 +316,19 @@ def test_unreachable_audit_store(paper: AppConfig) -> None:
     check = _by_name(_run(paper, _db_secrets(), engine_factory=broken))["Audit store"]
     assert check.status is CheckStatus.WARN
     assert check.detail == "unreachable: connection refused"
+
+
+def test_live_gates_join_the_health_check(paper: AppConfig) -> None:
+    gate = CheckResult("Paper evaluation", CheckStatus.FAIL, "says NO-GO")
+    results = run_healthchecks(
+        paper,
+        make_secrets(),
+        broker_factory=FakeBroker,
+        market_data_factory=lambda: healthy_market_data(PROBE_SYMBOL),
+        news_factory=lambda: FakeNews([make_article(symbols=(PROBE_SYMBOL,))]),
+        llm_factory=None,
+        clock=lambda: NOW,
+        live_checks=lambda: [gate],
+    )
+    assert results[-1] == gate
+    assert not overall_ok(results)  # a failed gate fails pre-flight: no trading that day

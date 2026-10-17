@@ -29,7 +29,8 @@ from trading_agent.domain.ports import (
 from trading_agent.execution.alpaca_broker import AlpacaBroker
 from trading_agent.execution.alpaca_orders import AlpacaOrderExecutor
 from trading_agent.execution.executor import Executor
-from trading_agent.health import run_healthchecks
+from trading_agent.execution.live import blocking_reason, live_readiness
+from trading_agent.health import CheckResult, run_healthchecks
 from trading_agent.llm.anthropic_provider import AnthropicProvider
 from trading_agent.llm.gateway import LLMGateway
 from trading_agent.llm.openai_provider import OpenAIProvider
@@ -137,10 +138,29 @@ class Container:
             paper=self.config.broker.paper,
         )
 
+    def live_checks(self) -> list[CheckResult]:
+        """Every real-money gate (ADR 0012). Read-only; never raises."""
+        return live_readiness(
+            self.config,
+            self.secrets,
+            account=lambda: self.build_broker().get_account(),
+            audit_environments=lambda: self.build_audit_store().environments(),
+            evaluation_dir=Path(self.config.reporting.output_dir),
+        )
+
     def build_executor(self) -> Executor:
-        """Order execution. Raises `ExecutionDisabledError` for a live configuration."""
+        """Order execution. Live entries are authorized only if every live gate passes now;
+        otherwise the executor can still manage and exit positions, but not enter."""
         orders = self.build_order_port()
-        return Executor(orders, self.build_broker(), self.build_market_data(), self.config)
+        blocked = blocking_reason(self.live_checks()) if self.config.is_live else None
+        return Executor(
+            orders,
+            self.build_broker(),
+            self.build_market_data(),
+            self.config,
+            live_authorized=self.config.is_live and blocked is None,
+            entries_blocked=blocked,
+        )
 
     def database_url(self) -> str | None:
         value = self.secrets.database_url
@@ -173,6 +193,7 @@ class Container:
                 news_factory=self.build_news,
                 llm_factory=self.build_llm_gateway,
                 engine_factory=None if url is None else (lambda: make_engine(url)),
+                live_checks=self.live_checks if self.config.is_live else None,
             )
 
         def analyze(run_id: str) -> Any:

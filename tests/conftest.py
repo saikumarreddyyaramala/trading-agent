@@ -62,6 +62,8 @@ def _isolated_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         "ANTHROPIC_API_KEY",
         "LIVE_TRADING_CONFIRMED",
         "DATABASE_URL",
+        "ENV_FILE",
+        "REPORT_WEBHOOK_URL",
     ):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.chdir(tmp_path)

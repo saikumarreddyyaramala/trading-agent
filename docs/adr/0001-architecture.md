@@ -57,4 +57,4 @@ real services are opt-in and never run in CI.
   interviewers ask about.
 
 ## Planned decisions
-- 0012: Going live: the $100 cash account and the switches that gate it (Phase 11)
+- (none: all eleven phases are decided; see ADRs 0002-0012)

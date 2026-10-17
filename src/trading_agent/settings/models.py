@@ -168,6 +168,15 @@ class EvaluationConfig(_Strict):
     bootstrap_samples: int = Field(default=5000, ge=500, le=100_000)
 
 
+class LiveConfig(_Strict):
+    """Extra gates for real money (ADR 0012). Checked by `trading-agent live-check`."""
+
+    # The paper evaluation that said GO must be at most this old.
+    max_evaluation_age_days: int = Field(default=7, ge=1, le=30)
+    # The live account must be small: this system is not built to manage more.
+    max_account_equity_usd: Decimal = Field(default=Decimal("150"), gt=0, le=10_000)
+
+
 class OrchestrationConfig(_Strict):
     """The daily cycle. Step times come from `schedule`; these tune the loop."""
 
@@ -215,6 +224,7 @@ class AppConfig(_Strict):
     orchestration: OrchestrationConfig = OrchestrationConfig()
     reporting: ReportingConfig = ReportingConfig()
     evaluation: EvaluationConfig = EvaluationConfig()
+    live: LiveConfig = LiveConfig()
 
     @model_validator(mode="after")
     def _environment_matches_broker(self) -> AppConfig:

@@ -246,6 +246,7 @@ def run_healthchecks(
     llm_factory: Callable[[], LLMGateway] | None,
     clock: Callable[[], datetime] | None = None,
     engine_factory: Callable[[], Any] | None = None,
+    live_checks: Callable[[], list[CheckResult]] | None = None,
 ) -> list[CheckResult]:
     now = clock() if clock else datetime.now(UTC)
     skip_llm = llm_factory is None
@@ -296,6 +297,9 @@ def run_healthchecks(
             results.append(CheckResult("LLM", CheckStatus.FAIL, str(exc)))
         else:
             results.append(_check_llm(gateway))
+
+    if live_checks is not None:
+        results.extend(live_checks())  # real-money gates: any FAIL blocks new trades
 
     return results
 

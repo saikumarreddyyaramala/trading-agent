@@ -17,7 +17,7 @@ from tests.conftest import (
     make_quote,
 )
 from trading_agent.domain.models import OrderPlan, RiskCheck, RiskDecision
-from trading_agent.execution.executor import ExecutionDisabledError, Executor
+from trading_agent.execution.executor import Executor
 from trading_agent.settings.models import AppConfig
 
 PLAN = OrderPlan(
@@ -73,10 +73,74 @@ def _executor(
 # ---------- Guards ----------
 
 
-def test_live_configuration_is_refused_outright() -> None:
-    live = {"environment": "live", "broker": {"paper": False}, "storage": {"required": True}}
-    with pytest.raises(ExecutionDisabledError, match="paper-only until Phase 11"):
-        _executor(config=live)
+LIVE_CONFIG = {"environment": "live", "broker": {"paper": False}, "storage": {"required": True}}
+
+
+def _live_executor(orders: FakeOrders | None = None, **kwargs: Any) -> tuple[Executor, FakeOrders]:
+    orders = orders or FakeOrders("instant")
+    time = FakeTime()
+    executor = Executor(
+        orders,
+        kwargs.pop("broker", FakeBroker(is_paper=False)),
+        healthy_market_data("AAPL"),
+        AppConfig.model_validate(LIVE_CONFIG),
+        clock=time.clock,
+        sleep=time.sleep,
+        **kwargs,
+    )
+    return executor, orders
+
+
+def test_live_entries_need_explicit_authorization() -> None:
+    executor, orders = _live_executor()
+    result = executor.enter(APPROVED, "run1")
+    assert result.status == "refused"
+    assert "live entries require every live gate to pass" in result.reason
+    assert orders.log == []
+
+
+def test_failed_live_gates_block_entries_with_the_reason() -> None:
+    executor, orders = _live_executor(entries_blocked="live gates failed: Paper evaluation: NO-GO")
+    result = executor.enter(APPROVED, "run1")
+    assert result.reason == "live gates failed: Paper evaluation: NO-GO"
+    assert orders.log == []
+
+
+def test_authorized_live_entry_goes_through() -> None:
+    executor, orders = _live_executor(live_authorized=True)
+    assert executor.enter(APPROVED, "run1").status == "entered"
+    assert [action for action, _ in orders.log] == ["buy", "stop"]
+
+
+def test_live_hard_cap_overrides_any_config() -> None:
+    big = APPROVED.model_copy(
+        update={"plan": PLAN.model_copy(update={"notional_usd": Decimal("100.01")})}
+    )
+    executor, orders = _live_executor(live_authorized=True)
+    result = executor.enter(big, "run1")
+    assert result.status == "refused"
+    assert result.reason == "order value $100.01 exceeds the $100 live hard cap"
+    assert orders.log == []
+
+
+def test_blocked_live_executor_still_exits() -> None:
+    late = FakeTime(datetime(2026, 10, 15, 19, 50, tzinfo=UTC))
+    executor = Executor(
+        FakeOrders(),
+        FakeBroker(is_paper=False, positions=(make_position("AAPL"),)),
+        healthy_market_data("AAPL"),
+        AppConfig.model_validate(LIVE_CONFIG),
+        clock=late.clock,
+        sleep=late.sleep,
+        entries_blocked="live gates failed",
+    )
+    assert executor.manage()[0].action == "force_close"
+    assert executor.flatten().action == "flattened"
+
+
+def test_paper_entries_need_no_authorization() -> None:
+    executor, _, _ = _executor(FakeOrders("instant"))
+    assert executor.enter(APPROVED, "run1").status == "entered"
 
 
 @pytest.mark.parametrize(

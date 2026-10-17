@@ -478,26 +478,31 @@ def test_buy_bad_price_exits_2(config_dir: Path, monkeypatch: pytest.MonkeyPatch
     assert result.exit_code == 2
 
 
-def test_buy_is_refused_for_live_config(config_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("ALPACA_API_KEY", "k")
-    monkeypatch.setenv("ALPACA_SECRET_KEY", "s")
-    monkeypatch.setenv("LIVE_TRADING_CONFIRMED", "true")
-    result = runner.invoke(
-        cli.app,
-        [
-            "buy",
-            "AAPL",
-            "--price",
-            "100",
-            "--confirm",
-            "--env",
-            "live",
-            "--config-dir",
-            str(config_dir),
-        ],
+def test_live_buy_is_refused_when_gates_fail(
+    config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    live = AppConfig.model_validate(
+        {"environment": "live", "broker": {"paper": False}, "storage": {"required": True}}
     )
-    assert result.exit_code == 2
-    assert "paper-only until Phase 11" in result.output
+    orders = FakeOrders("instant")
+    time = FakeTime()
+    blocked = Executor(
+        orders,
+        FakeBroker(is_paper=False),
+        healthy_market_data("AAPL"),
+        live,
+        clock=time.clock,
+        sleep=time.sleep,
+        entries_blocked="live gates failed: Paper evaluation: says NO-GO",
+    )
+    monkeypatch.setattr(Container, "build_executor", lambda self: blocked)
+    _use_fake_risk(monkeypatch, FakeBroker())
+    result = runner.invoke(
+        cli.app, ["buy", "AAPL", "--price", "100.05", "--confirm", "--config-dir", str(config_dir)]
+    )
+    assert result.exit_code == 1
+    assert "REFUSED  live gates failed: Paper evaluation: says NO-GO" in result.output
+    assert orders.log == []
 
 
 def test_manage_pass(config_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1153,3 +1158,59 @@ def test_evaluate_critic_disabled(
     result = runner.invoke(cli.app, ["evaluate-critic", "--config-dir", str(config_dir)])
     assert result.exit_code == 2
     assert "disabled" in result.output
+
+
+# ---------- live-check ----------
+
+
+def _fake_live_checks(monkeypatch: pytest.MonkeyPatch, *, passing: bool) -> None:
+    from trading_agent.health import CheckResult, CheckStatus
+
+    status = CheckStatus.PASS if passing else CheckStatus.FAIL
+    results = [
+        CheckResult("Live switches", CheckStatus.PASS, "live config, confirmed"),
+        CheckResult(
+            "Paper evaluation", status, "GO" if passing else "evaluation-x.json says NO-GO"
+        ),
+    ]
+    monkeypatch.setattr(Container, "live_checks", lambda self: results)
+
+
+def test_live_check_needs_the_live_environment(config_dir: Path) -> None:
+    result = runner.invoke(cli.app, ["live-check", "--config-dir", str(config_dir)])
+    assert result.exit_code == 2
+    assert "--env live" in result.output
+
+
+def test_live_check_ready(config_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _fake_live_checks(monkeypatch, passing=True)
+    result = runner.invoke(
+        cli.app, ["live-check", "--env", "live", "--config-dir", str(config_dir)]
+    )
+    assert result.exit_code == 0, result.output
+    assert "PASS  Paper evaluation" in result.output
+    assert "Ready: live entries are allowed." in result.output
+
+
+def test_live_check_blocked(config_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _fake_live_checks(monkeypatch, passing=False)
+    result = runner.invoke(
+        cli.app, ["live-check", "--env", "live", "--config-dir", str(config_dir)]
+    )
+    assert result.exit_code == 1
+    assert "FAIL  Paper evaluation     evaluation-x.json says NO-GO" in result.output
+    assert "Live entries are BLOCKED. Exits (manage, flatten) still work." in result.output
+
+
+def test_env_file_selects_a_separate_secrets_file(
+    config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    live_env = tmp_path / ".env.live"
+    live_env.write_text("LIVE_TRADING_CONFIRMED=true\nALPACA_API_KEY=live-key\n", encoding="utf-8")
+    monkeypatch.setenv("ENV_FILE", str(live_env))
+    container = cli._container(None, config_dir)
+    assert container.secrets.live_trading_confirmed is True
+    assert container.secrets.require("alpaca_api_key") == "live-key"
+
+    monkeypatch.delenv("ENV_FILE")
+    assert cli._container(None, config_dir).secrets.live_trading_confirmed is False

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import uuid
 from collections.abc import Callable
 from datetime import UTC, date, datetime, timedelta
@@ -24,7 +25,6 @@ from trading_agent.evaluation.replay import replay_critic
 from trading_agent.evaluation.scorecard import ScorecardBuilder, render_scorecard
 from trading_agent.execution.executor import (
     EntryResult,
-    ExecutionDisabledError,
     ManageResult,
 )
 from trading_agent.health import CheckStatus, format_age, overall_ok, run_healthchecks
@@ -92,7 +92,9 @@ def _audit(recorder: AuditRecorder, what: str, fn: Callable[[AuditStore], None])
 def _container(env: str | None, config_dir: Path | None) -> Container:
     configure_logging()
     try:
-        return Container(config=load_config(env, config_dir), secrets=Secrets())
+        # ENV_FILE lets live credentials live in their own file (e.g. .env.live), apart from paper.
+        secrets = Secrets(_env_file=os.environ.get("ENV_FILE", ".env"))
+        return Container(config=load_config(env, config_dir), secrets=secrets)
     except ConfigError as exc:
         typer.secho(f"Configuration error: {exc}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=2) from exc
@@ -115,6 +117,7 @@ def healthcheck(
         news_factory=container.build_news,
         llm_factory=None if skip_llm else container.build_llm_gateway,
         engine_factory=_engine_factory(container),
+        live_checks=container.live_checks if container.config.is_live else None,
     )
     ok = overall_ok(results)
 
@@ -431,7 +434,7 @@ def _print_manage(results: tuple[ManageResult, ...]) -> None:
 def _executor_or_exit(container: Container) -> Any:
     try:
         return container.build_executor()
-    except (ConfigError, ExecutionDisabledError) as exc:
+    except ConfigError as exc:
         typer.secho(f"Execution unavailable: {exc}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=2) from exc
 
@@ -647,7 +650,7 @@ def run(
     container = _container(env, config_dir)
     try:
         services = container.build_cycle_services()
-    except (ConfigError, ExecutionDisabledError) as exc:
+    except ConfigError as exc:
         typer.secho(f"Cannot start the cycle: {exc}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=2) from exc
     cycle = DailyCycle(services, container.config)
@@ -879,6 +882,31 @@ def evaluate_critic(
             )
     for run_id, reason in result.skipped.items():
         typer.echo(f"  skipped {run_id}: {reason}")
+
+
+@app.command("live-check")
+def live_check(env: EnvOption = None, config_dir: ConfigDirOption = None) -> None:
+    """Check every gate for real-money trading (ADR 0012). Read-only: places no order."""
+    container = _container(env, config_dir)
+    if not container.config.is_live:
+        typer.secho(
+            "This checks the live configuration: run it with --env live (or APP_ENV=live).",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(code=2)
+    results = container.live_checks()
+    for result in results:
+        typer.secho(f"{result.status.value:<5}", fg=_COLORS[result.status], nl=False)
+        typer.echo(f" {result.name:<20} {result.detail}")
+    ok = overall_ok(results)
+    verdict = (
+        "Ready: live entries are allowed."
+        if ok
+        else "Live entries are BLOCKED. Exits (manage, flatten) still work."
+    )
+    typer.secho(f"\n{verdict}", fg=typer.colors.GREEN if ok else typer.colors.RED, bold=True)
+    raise typer.Exit(code=0 if ok else 1)
 
 
 @app.command("show-config")

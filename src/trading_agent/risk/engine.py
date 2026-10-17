@@ -329,8 +329,12 @@ class RiskEngine:
         # Allow the configured deviation above the lower of the live ask and the analyst's
         # price, so a stale-high reference can never loosen the limit.
         limit_price = _cents_down(min(price, reference) * (1 + risk.max_price_deviation_pct / 100))
-        # Cash, not buying power: no margin, ever.
-        budget = min(risk.max_position_usd, account.cash)
+        # The most conservative money figure the broker reports: never margin, and never
+        # unsettled funds in a cash account (which would risk a good-faith violation).
+        available = [account.cash, account.buying_power]
+        if account.non_marginable_buying_power is not None:
+            available.append(account.non_marginable_buying_power)
+        budget = min(risk.max_position_usd, *available)
 
         if asset.fractionable:
             quantity = (budget / limit_price).quantize(FRACTIONAL_STEP, rounding=ROUND_DOWN)

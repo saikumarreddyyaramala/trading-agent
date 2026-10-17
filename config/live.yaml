@@ -9,3 +9,8 @@ broker:
 # Real money is never traded without an audit record.
 storage:
   required: true
+
+# Gates for real money, checked by `trading-agent live-check` and before every entry.
+live:
+  max_evaluation_age_days: 7     # the paper evaluation saying GO must be this recent
+  max_account_equity_usd: 150    # refuse to run against a larger account

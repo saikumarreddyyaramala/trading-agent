@@ -17,7 +17,7 @@ separate from the read-only `BrokerPort`. Research tools and agents are built on
 read-only ports. The guarantee that "the AI can never place an order" holds by construction,
 not by convention.
 
-### 2. Paper only until Phase 11
+### 2. Paper only until Phase 11 (superseded by ADR 0012)
 `Executor` raises `ExecutionDisabledError` for any live configuration, even with
 `LIVE_TRADING_CONFIRMED=true`. Enabling real money will be a reviewed code change with its
 own ADR, not a config edit.

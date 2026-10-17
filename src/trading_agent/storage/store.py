@@ -92,6 +92,10 @@ class AuditStore(Protocol):
         """Analyses and critiques, and their combined token usage, for runs with a prefix."""
         ...
 
+    def environments(self) -> set[str]:
+        """The environments (paper, live) this database holds runs for."""
+        ...
+
 
 class NullAuditStore:
     """Used when no database is configured: records nothing, finds nothing."""
@@ -145,6 +149,9 @@ class NullAuditStore:
 
     def analysis_totals(self, run_id_prefix: str) -> dict[str, int]:
         return {"analyses": 0, "critiques": 0, "input_tokens": 0, "output_tokens": 0}
+
+    def environments(self) -> set[str]:
+        return set()
 
 
 class SqlAuditStore:
@@ -462,6 +469,13 @@ class SqlAuditStore:
             }
 
         return self._read("analysis totals", read)
+
+    def environments(self) -> set[str]:
+        def read(connection: sa.Connection) -> set[str]:
+            query = sa.select(schema.runs.c.environment).distinct()
+            return {row[0] for row in connection.execute(query)}
+
+        return self._read("environments", read)
 
     def record_critique(self, result: CriticResult) -> None:
         def write(connection: sa.Connection) -> None:

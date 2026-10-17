@@ -33,6 +33,9 @@ class _Client:
             pattern_day_trader=False,
             trading_blocked=False,
             account_blocked=False,
+            multiplier="1",
+            non_marginable_buying_power="99.5",
+            daytrade_count=2,
         )
 
     def get_clock(self) -> Any:
@@ -50,6 +53,9 @@ def test_account_is_translated_and_masked() -> None:
     assert account.cash == Decimal("100000.5")
     assert account.equity == Decimal("100250")
     assert account.is_paper is True
+    assert account.multiplier == Decimal("1")
+    assert account.non_marginable_buying_power == Decimal("99.5")
+    assert account.daytrade_count == 2
 
 
 def test_clock_is_translated() -> None:

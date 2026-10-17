@@ -22,7 +22,7 @@ risk engine, executes on a broker, and reports the result against the S&P 500.
 | 8 | Daily report: P&L vs SPY, performance to date, Markdown/JSON, webhook | Done |
 | 9 | Critic agent: independent review of every buy, veto only, code-enforced | Done |
 | 10 | Evaluation: scorecard vs SPY, gatekeeper counterfactuals, go/no-go bar | Done |
-| 11 | Go live ($100) | Next |
+| 11 | Go live ($100): live gates, hard cap, cash-account checks (operator switches on) | Done |
 
 ## Architecture
 
@@ -48,7 +48,7 @@ Key rules (see [ADR 0001](docs/adr/0001-architecture.md), [ADR 0002](docs/adr/00
 [ADR 0005](docs/adr/0005-risk-engine.md), [ADR 0006](docs/adr/0006-order-execution.md),
 [ADR 0007](docs/adr/0007-audit-trail.md), [ADR 0008](docs/adr/0008-daily-cycle.md),
 [ADR 0009](docs/adr/0009-daily-report.md), [ADR 0010](docs/adr/0010-critic-agent.md),
-and [ADR 0011](docs/adr/0011-evaluation.md)):
+[ADR 0011](docs/adr/0011-evaluation.md), and [ADR 0012](docs/adr/0012-going-live.md)):
 - The AI has read-only tools; it can never place an order directly. Tool inputs are
   validated and bounded, and each session has a call budget.
 - Every model call goes through the LLM gateway (pinned model, fallback, token caps, logs).
@@ -122,6 +122,7 @@ Ready
 | `uv run trading-agent report` | Today's report (`--date`, `--json`, `--send`); saved to `reports/` |
 | `uv run trading-agent evaluate` | Score the paper record against the go/no-go bar (exit 0 = GO) |
 | `uv run trading-agent evaluate-critic` | Replay the current critic over recorded proposals (uses tokens) |
+| `uv run trading-agent live-check --env live` | Check every real-money gate (read-only, places no order) |
 | `uv run trading-agent db upgrade` | Create or migrate the audit database (`DATABASE_URL`) |
 | `uv run trading-agent runs` | Recent runs from the audit trail |
 | `uv run trading-agent show-run RUN_ID` | Everything recorded for one run (JSON) |
@@ -188,6 +189,29 @@ critic and risk engine stopped and what that would have returned, and LLM cost. 
 the go/no-go bar written in advance in `config/base.yaml` (see ADR 0011): at least 40 cycle
 days and 20 trades, a positive mean excess return over SPY, a drawdown within $15, and more.
 Every criterion must pass, and missing data counts as a fail.
+
+## Going live (you take these steps, not the software)
+
+Live entries are possible only when every gate in ADR 0012 passes. Exits always work.
+
+1. **Earn it on paper.** Run the daily cycle on paper for about two months, then
+   `uv run trading-agent evaluate`. Continue only if it says **GO** (exit code 0).
+2. **Open a cash account** at Alpaca (not margin) and fund it with about $100.
+3. **Keep live credentials separate:** create `.env.live` with the live API keys, a separate
+   `DATABASE_URL` for live, and `LIVE_TRADING_CONFIRMED=true`. Use it with `ENV_FILE=.env.live`.
+4. **Create the live database:** `ENV_FILE=.env.live uv run trading-agent db upgrade --env live`.
+5. **Check every gate:** `ENV_FILE=.env.live uv run trading-agent live-check --env live`.
+   All must PASS.
+6. **Start:** `ENV_FILE=.env.live uv run trading-agent run --env live`. Watch the daily reports.
+7. **Stay current:** re-run `evaluate` on the paper record at least weekly. A stale GO
+   blocks new live entries.
+8. **Stop at any time:** `ENV_FILE=.env.live uv run trading-agent flatten --confirm --env live`,
+   then stop the process or set `kill_switch: true`.
+
+Guardrails in code: one trade a day, at most $100 per order whatever the config says,
+sizing from settled non-margin cash only, a forced close before the bell, and every
+decision recorded. This is still an educational project, not financial advice. Only risk
+money you can afford to lose.
 
 ## Audit database
 

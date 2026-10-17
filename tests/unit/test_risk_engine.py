@@ -360,3 +360,17 @@ def test_rejection_cannot_carry_a_plan() -> None:
     failed = RiskCheck(name="x", passed=False, detail="no")
     with pytest.raises(ValueError, match="cannot carry an order plan"):
         RiskDecision(approved=False, symbol="AAPL", checks=(failed,), plan=plan, evaluated_at=NOW)
+
+
+def test_sizing_uses_the_most_conservative_money_figure() -> None:
+    # A cash account with $100 cash but only $20 settled: size from the $20.
+    broker = FakeBroker(equity="100", cash="100")
+    original = broker.get_account
+
+    def settled_only() -> Any:
+        return original().model_copy(update={"non_marginable_buying_power": Decimal("20")})
+
+    broker.get_account = settled_only  # type: ignore[method-assign]
+    decision = _evaluate(broker=broker)
+    assert decision.plan is not None
+    assert decision.plan.quantity == Decimal("0.1959")  # $20 / $102.05

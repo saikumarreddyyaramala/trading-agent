@@ -11,7 +11,8 @@ from trading_agent.agents import AnalystAgent
 from trading_agent.bootstrap import Container
 from trading_agent.data import AlpacaMarketData, AlpacaNews, MarketDataCollector
 from trading_agent.execution import AlpacaBroker
-from trading_agent.execution.executor import ExecutionDisabledError, Executor
+from trading_agent.execution.executor import Executor
+from trading_agent.health import CheckResult, CheckStatus
 from trading_agent.llm import LLMGateway
 from trading_agent.mcp_server import ResearchTools
 from trading_agent.risk import RiskEngine
@@ -131,12 +132,40 @@ def test_builds_paper_executor(config_dir: Path) -> None:
     assert isinstance(container.build_executor(), Executor)
 
 
-def test_live_executor_is_refused_even_when_confirmed(config_dir: Path) -> None:
+def _gates(monkeypatch: pytest.MonkeyPatch, *, passing: bool) -> None:
+    status = CheckStatus.PASS if passing else CheckStatus.FAIL
+    results = [CheckResult("Paper evaluation", status, "GO" if passing else "says NO-GO")]
+    monkeypatch.setattr(Container, "live_checks", lambda self: results)
+
+
+def test_live_executor_is_blocked_when_a_gate_fails(
+    config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _gates(monkeypatch, passing=False)
     container = Container(
         config=load_config("live", config_dir), secrets=make_secrets(live_trading_confirmed=True)
     )
-    with pytest.raises(ExecutionDisabledError, match="paper-only"):
-        container.build_executor()
+    executor = container.build_executor()
+    assert executor._entries_blocked == "live gates failed: Paper evaluation: says NO-GO"
+
+
+def test_live_executor_is_authorized_only_when_every_gate_passes(
+    config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _gates(monkeypatch, passing=True)
+    container = Container(
+        config=load_config("live", config_dir), secrets=make_secrets(live_trading_confirmed=True)
+    )
+    assert container.build_executor()._entries_blocked is None
+
+
+def test_paper_executor_skips_live_gates(config_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def explode(self: Container) -> None:
+        raise AssertionError("live gates must not run for paper")
+
+    monkeypatch.setattr(Container, "live_checks", explode)
+    container = Container(config=load_config("paper", config_dir), secrets=make_secrets())
+    assert container.build_executor()._entries_blocked is None
 
 
 def test_executor_needs_broker_keys(config_dir: Path) -> None:
@@ -176,11 +205,23 @@ def test_builds_cycle_services(config_dir: Path) -> None:
     assert callable(services.health_check)
 
 
-def test_cycle_services_refuse_live(config_dir: Path) -> None:
+def test_live_cycle_services_block_entries_until_the_gates_pass(
+    config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _gates(monkeypatch, passing=False)
     secrets = make_secrets(live_trading_confirmed=True, database_url=SecretStr("sqlite://"))
     container = Container(config=load_config("live", config_dir), secrets=secrets)
-    with pytest.raises(ExecutionDisabledError):
-        container.build_cycle_services()
+    services = container.build_cycle_services()
+    assert services.executor._entries_blocked is not None  # type: ignore[attr-defined]
+
+
+def test_live_checks_run_without_network_when_keys_are_missing(config_dir: Path) -> None:
+    container = Container(
+        config=load_config("live", config_dir), secrets=make_secrets(alpaca_api_key=None)
+    )
+    results = {r.name: r for r in container.live_checks()}
+    assert results["Cash account"].status is CheckStatus.FAIL
+    assert "missing broker credentials" in results["Cash account"].detail
 
 
 def test_publish_report_saves_and_sends(

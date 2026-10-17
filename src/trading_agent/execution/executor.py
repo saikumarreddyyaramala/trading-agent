@@ -1,7 +1,8 @@
 """Order execution: turn an approved risk decision into a protected position, and get out.
 
 Safety rules enforced here:
-- Paper only. The executor refuses to exist for a live config; lifting that is Phase 11.
+- Live entries need explicit authorization, granted only after every live gate passes
+  (ADR 0012), and are capped at LIVE_HARD_CAP_USD whatever the config says.
 - Only a fresh, approved `RiskDecision` can open a position, and only within its plan.
 - The kill switch blocks entries, never exits.
 - Idempotent: order ids derive from the run id, so a retry finds the existing order
@@ -24,15 +25,12 @@ from pydantic import BaseModel, ConfigDict
 
 from trading_agent.domain.models import BrokerOrder, Position, RiskDecision
 from trading_agent.domain.ports import BrokerPort, MarketDataPort, OrderExecutionPort
+from trading_agent.execution.live import LIVE_HARD_CAP_USD
 from trading_agent.observability.logging import get_logger
 from trading_agent.settings.models import AppConfig
 
 CENT = Decimal("0.01")
 _RUN_ID = re.compile(r"^[A-Za-z0-9-]{1,64}$")
-
-
-class ExecutionDisabledError(RuntimeError):
-    """Execution was requested in a configuration where it is not allowed."""
 
 
 class EntryResult(BaseModel):
@@ -73,11 +71,14 @@ class Executor:
         clock: Callable[[], datetime] | None = None,
         sleep: Callable[[float], None] | None = None,
         logger: Any = None,
+        live_authorized: bool = False,
+        entries_blocked: str | None = None,
     ) -> None:
-        if config.is_live or not config.broker.paper:
-            raise ExecutionDisabledError(
-                "order execution is paper-only until Phase 11; refusing a live configuration"
-            )
+        """`live_authorized` must be True for any live entry; only the composition root sets it,
+        after every live gate passes (ADR 0012). Exits never depend on it."""
+        if config.is_live and not live_authorized and entries_blocked is None:
+            entries_blocked = "live entries require every live gate to pass (`live-check`)"
+        self._entries_blocked = entries_blocked
         self._orders = orders
         self._broker = broker
         self._market_data = market_data
@@ -169,6 +170,13 @@ class Executor:
             return "the risk decision is not an approval"
         if self._config.kill_switch:
             return "kill switch is on"
+        if self._entries_blocked:
+            return self._entries_blocked
+        if self._config.is_live and decision.plan.notional_usd > LIVE_HARD_CAP_USD:
+            return (
+                f"order value ${decision.plan.notional_usd} exceeds the "
+                f"${LIVE_HARD_CAP_USD} live hard cap"
+            )
         if not _RUN_ID.match(run_id):
             return "run id must be 1-64 letters, digits, or dashes"
         age = (self._clock() - decision.evaluated_at).total_seconds()

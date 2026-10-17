@@ -77,6 +77,11 @@ class AlpacaBroker:
             trading_blocked=bool(account.trading_blocked),
             account_blocked=bool(account.account_blocked),
             is_paper=self._paper,
+            multiplier=_to_decimal(account.multiplier or "1"),
+            non_marginable_buying_power=None
+            if account.non_marginable_buying_power in (None, "")
+            else _to_decimal(account.non_marginable_buying_power),
+            daytrade_count=int(account.daytrade_count or 0),
         )
 
     def get_clock(self) -> MarketClock:

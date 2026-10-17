@@ -31,6 +31,11 @@ class AccountSnapshot(_Frozen):
     trading_blocked: bool
     account_blocked: bool
     is_paper: bool
+    # 1 = cash account; 2-4 = margin. Live trading requires a cash account.
+    multiplier: Decimal = Decimal("1")
+    # Buying power that cannot come from margin; None if the broker did not say.
+    non_marginable_buying_power: Decimal | None = None
+    daytrade_count: int = 0
 
 
 class MarketClock(_Frozen):
