@@ -21,8 +21,8 @@ risk engine, executes on a broker, and reports the result against the S&P 500.
 | 7 | Daily cycle: scheduled steps, resume after restart, holidays and early closes | Done |
 | 8 | Daily report: P&L vs SPY, performance to date, Markdown/JSON, webhook | Done |
 | 9 | Critic agent: independent review of every buy, veto only, code-enforced | Done |
-| 10 | Evaluation | Next |
-| 11 | Go live ($100) | Planned |
+| 10 | Evaluation: scorecard vs SPY, gatekeeper counterfactuals, go/no-go bar | Done |
+| 11 | Go live ($100) | Next |
 
 ## Architecture
 
@@ -47,7 +47,8 @@ Key rules (see [ADR 0001](docs/adr/0001-architecture.md), [ADR 0002](docs/adr/00
 [ADR 0003](docs/adr/0003-mcp-tools.md), [ADR 0004](docs/adr/0004-analyst-agent.md),
 [ADR 0005](docs/adr/0005-risk-engine.md), [ADR 0006](docs/adr/0006-order-execution.md),
 [ADR 0007](docs/adr/0007-audit-trail.md), [ADR 0008](docs/adr/0008-daily-cycle.md),
-[ADR 0009](docs/adr/0009-daily-report.md), and [ADR 0010](docs/adr/0010-critic-agent.md)):
+[ADR 0009](docs/adr/0009-daily-report.md), [ADR 0010](docs/adr/0010-critic-agent.md),
+and [ADR 0011](docs/adr/0011-evaluation.md)):
 - The AI has read-only tools; it can never place an order directly. Tool inputs are
   validated and bounded, and each session has a call budget.
 - Every model call goes through the LLM gateway (pinned model, fallback, token caps, logs).
@@ -119,6 +120,8 @@ Ready
 | `uv run trading-agent run` | Run the daily cycle on the PAPER account, every trading day (`--once` for today only) |
 | `uv run trading-agent cycle-status` | Today's cycle: each step's status and detail |
 | `uv run trading-agent report` | Today's report (`--date`, `--json`, `--send`); saved to `reports/` |
+| `uv run trading-agent evaluate` | Score the paper record against the go/no-go bar (exit 0 = GO) |
+| `uv run trading-agent evaluate-critic` | Replay the current critic over recorded proposals (uses tokens) |
 | `uv run trading-agent db upgrade` | Create or migrate the audit database (`DATABASE_URL`) |
 | `uv run trading-agent runs` | Recent runs from the audit trail |
 | `uv run trading-agent show-run RUN_ID` | Everything recorded for one run (JSON) |
@@ -143,6 +146,7 @@ src/trading_agent/
   storage/               audit trail: schema, Alembic migrations, store
   orchestration/         the daily cycle: schedule, steps, resume, market calendar
   reporting/             daily report: trade P&L, SPY benchmark, Markdown/JSON, webhook
+  evaluation/            scorecard, go/no-go criteria, counterfactuals, critic replay
   bootstrap.py           composition root
   health.py              pre-flight checks
   cli.py                 `trading-agent` command
@@ -175,6 +179,15 @@ the analysis and its evidence, the risk decision, the trade's fills and P&L, the
 SPY open-to-close move for comparison, and performance to date. Only trades placed by the
 daily cycle count toward performance. Set your LLM prices under `reporting:` in
 `config/base.yaml` to see cost in dollars as well as tokens.
+
+## Evaluation: the bar for real money
+
+`trading-agent evaluate` scores the paper record: the funnel from analyses to trades,
+performance against SPY's same-day move (with a bootstrap confidence interval), what the
+critic and risk engine stopped and what that would have returned, and LLM cost. It checks
+the go/no-go bar written in advance in `config/base.yaml` (see ADR 0011): at least 40 cycle
+days and 20 trades, a positive mean excess return over SPY, a drawdown within $15, and more.
+Every criterion must pass, and missing data counts as a fail.
 
 ## Audit database
 

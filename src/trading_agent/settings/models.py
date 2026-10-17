@@ -150,6 +150,24 @@ class CriticConfig(_Strict):
     max_evidence_chars: int = Field(default=60_000, ge=5_000, le=200_000)
 
 
+class EvaluationConfig(_Strict):
+    """The go/no-go bar for live trading, fixed in advance (ADR 0011). Every criterion must
+    pass; one that cannot be evaluated (missing data) counts as a fail."""
+
+    min_cycle_days: int = Field(default=40, ge=1)
+    min_closed_trades: int = Field(default=20, ge=1)
+    min_win_rate_pct: Decimal = Field(default=Decimal("45"), ge=0, le=100)
+    # Mean per-trade return minus SPY's same-day open-to-close move must be above this.
+    min_mean_excess_pct: Decimal = Decimal("0")
+    # ...and the lower end of its 90% bootstrap interval must be above this.
+    min_excess_ci_lower_pct: Decimal = Decimal("-0.5")
+    max_drawdown_usd: Decimal = Field(default=Decimal("15"), gt=0)
+    max_error_day_pct: Decimal = Field(default=Decimal("5"), ge=0, le=100)
+    # Needs reporting.llm_usd_per_million_* prices. None removes this criterion.
+    max_llm_cost_per_day_usd: Decimal | None = Field(default=Decimal("1.00"), gt=0)
+    bootstrap_samples: int = Field(default=5000, ge=500, le=100_000)
+
+
 class OrchestrationConfig(_Strict):
     """The daily cycle. Step times come from `schedule`; these tune the loop."""
 
@@ -196,6 +214,7 @@ class AppConfig(_Strict):
     storage: StorageConfig = StorageConfig()
     orchestration: OrchestrationConfig = OrchestrationConfig()
     reporting: ReportingConfig = ReportingConfig()
+    evaluation: EvaluationConfig = EvaluationConfig()
 
     @model_validator(mode="after")
     def _environment_matches_broker(self) -> AppConfig:

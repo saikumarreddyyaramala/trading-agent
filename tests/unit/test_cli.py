@@ -1013,3 +1013,143 @@ def test_critique_command_errors(
     _use_fake_analyst(monkeypatch, _analysis("proposed", BUY), _critique("failed"))
     failed = runner.invoke(cli.app, ["critique", "abc123", "--config-dir", str(config_dir)])
     assert failed.exit_code == 1
+
+
+# ---------- evaluate / evaluate-critic ----------
+
+GO_CONFIG = (
+    "environment: paper\nbroker:\n  paper: true\n"
+    "evaluation:\n  min_cycle_days: 5\n  min_closed_trades: 2\n"
+    "reporting:\n  llm_usd_per_million_input_tokens: 0.10\n"
+    "  llm_usd_per_million_output_tokens: 1.00\n"
+)
+
+
+@pytest.fixture
+def history(audit_db: sa.Engine, monkeypatch: pytest.MonkeyPatch) -> SqlAuditStore:
+    from tests.unit.test_evaluation import _bars, _history
+
+    store = SqlAuditStore(audit_db, AppConfig())
+    _history(store)
+    monkeypatch.setattr(Container, "build_market_data", lambda self: _bars())
+    return store
+
+
+def test_evaluate_go_exits_0_and_saves(
+    config_dir: Path, history: SqlAuditStore, tmp_path: Path
+) -> None:
+    (config_dir / "paper.yaml").write_text(GO_CONFIG, encoding="utf-8")
+    result = runner.invoke(
+        cli.app,
+        ["evaluate", "--from", "2026-10-12", "--to", "2026-10-16", "--config-dir", str(config_dir)],
+    )
+    assert result.exit_code == 0, result.output
+    assert "## Decision: **GO**" in result.stdout
+    assert (tmp_path / "reports" / "evaluation-2026-10-16.md").exists()
+    assert (tmp_path / "reports" / "evaluation-2026-10-16.json").exists()
+
+
+def test_evaluate_with_the_real_bar_is_no_go(config_dir: Path, history: SqlAuditStore) -> None:
+    # The shipped thresholds (40 days, 20 trades) cannot be met by five days of history.
+    result = runner.invoke(
+        cli.app,
+        ["evaluate", "--to", "2026-10-16", "--no-save", "--json", "--config-dir", str(config_dir)],
+    )
+    assert result.exit_code == 1
+    card = json.loads(result.stdout)
+    assert card["decision"] == "NO-GO"
+    assert card["start"] == "2026-10-12"  # defaults to the first recorded daily cycle
+
+
+def test_evaluate_needs_a_database_and_a_valid_window(
+    config_dir: Path, audit_db: sa.Engine
+) -> None:
+    bad = runner.invoke(
+        cli.app,
+        ["evaluate", "--from", "2026-10-16", "--to", "2026-10-12", "--config-dir", str(config_dir)],
+    )
+    assert bad.exit_code == 2
+    junk = runner.invoke(cli.app, ["evaluate", "--from", "soon", "--config-dir", str(config_dir)])
+    assert junk.exit_code == 2
+
+
+def test_evaluate_without_database(config_dir: Path) -> None:
+    result = runner.invoke(cli.app, ["evaluate", "--config-dir", str(config_dir)])
+    assert result.exit_code == 2
+    assert "DATABASE_URL is not set" in result.output
+
+
+def test_evaluate_save_failure(config_dir: Path, history: SqlAuditStore, tmp_path: Path) -> None:
+    (tmp_path / "reports").write_text("not a folder", encoding="utf-8")
+    result = runner.invoke(
+        cli.app, ["evaluate", "--to", "2026-10-16", "--config-dir", str(config_dir)]
+    )
+    assert result.exit_code == 1
+    assert "Could not save the scorecard" in result.output
+
+
+def test_evaluate_critic_replay(
+    config_dir: Path, history: SqlAuditStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from tests.unit.test_evaluation import _Critic
+
+    monkeypatch.setattr(Container, "build_critic", lambda self: _Critic("vetoed"))
+    result = runner.invoke(
+        cli.app,
+        [
+            "evaluate-critic",
+            "--from",
+            "2026-10-12",
+            "--to",
+            "2026-10-16",
+            "--config-dir",
+            str(config_dir),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert (
+        "Replayed 4 proposal(s) from 2026-10-12 to 2026-10-16: 1 agree, 3 now vetoed"
+        in result.output
+    )
+    assert "daily-20261012 AAPL: approved -> vetoed. now vetoed" in result.output
+
+    as_json = runner.invoke(
+        cli.app,
+        ["evaluate-critic", "--to", "2026-10-16", "--json", "--config-dir", str(config_dir)],
+    )
+    assert json.loads(as_json.stdout)["reviewed"] == 4
+
+
+def test_evaluate_critic_lists_skipped_runs(
+    config_dir: Path, audit_db: sa.Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from datetime import date as day_type
+
+    from tests.unit.test_evaluation import _Critic, _record_day
+
+    store = SqlAuditStore(audit_db, AppConfig())
+    _record_day(store, day_type(2026, 10, 12), "traded", with_outputs=False)
+    monkeypatch.setattr(Container, "build_critic", lambda self: _Critic("approved"))
+    monkeypatch.setattr(Container, "build_market_data", lambda self: FakeMarketData())
+    result = runner.invoke(
+        cli.app,
+        [
+            "evaluate-critic",
+            "--from",
+            "2026-10-12",
+            "--to",
+            "2026-10-12",
+            "--config-dir",
+            str(config_dir),
+        ],
+    )
+    assert "skipped daily-20261012: no tool outputs recorded" in result.output
+
+
+def test_evaluate_critic_disabled(
+    config_dir: Path, history: SqlAuditStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(Container, "build_critic", lambda self: None)
+    result = runner.invoke(cli.app, ["evaluate-critic", "--config-dir", str(config_dir)])
+    assert result.exit_code == 2
+    assert "disabled" in result.output

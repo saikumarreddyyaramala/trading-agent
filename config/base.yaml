@@ -101,3 +101,16 @@ reporting:
   # Set your actual LLM prices to see cost in dollars; left unset, only tokens are shown.
   llm_usd_per_million_input_tokens: null
   llm_usd_per_million_output_tokens: null
+
+# Go/no-go bar for live trading (ADR 0011), fixed in advance. `trading-agent evaluate`
+# scores the paper record against it. Every criterion must pass; missing data is a fail.
+evaluation:
+  min_cycle_days: 40             # about two months of daily cycles
+  min_closed_trades: 20
+  min_win_rate_pct: 45
+  min_mean_excess_pct: 0         # mean return per trade minus SPY's same-day move
+  min_excess_ci_lower_pct: -0.5  # lower end of the 90% bootstrap interval of that mean
+  max_drawdown_usd: 15           # half of the $30 cushion above the $70 equity floor
+  max_error_day_pct: 5
+  max_llm_cost_per_day_usd: 1.00 # needs reporting.llm_usd_per_million_* to be set
+  bootstrap_samples: 5000

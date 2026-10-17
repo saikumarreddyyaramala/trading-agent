@@ -259,3 +259,19 @@ def test_repo_config_critic(config_dir: Path) -> None:
 def test_invalid_critic_settings_are_rejected(override: dict[str, object]) -> None:
     with pytest.raises(ValueError, match="critic"):
         AppConfig.model_validate({"critic": override})
+
+
+def test_repo_config_evaluation_bar(config_dir: Path) -> None:
+    bar = load_config("paper", config_dir).evaluation
+    assert (bar.min_cycle_days, bar.min_closed_trades) == (40, 20)
+    assert bar.min_win_rate_pct == Decimal("45")
+    assert bar.max_drawdown_usd == Decimal("15")
+    assert bar.max_llm_cost_per_day_usd == Decimal("1.00")
+
+
+@pytest.mark.parametrize(
+    "override", [{"min_cycle_days": 0}, {"min_win_rate_pct": 101}, {"bootstrap_samples": 10}]
+)
+def test_invalid_evaluation_settings_are_rejected(override: dict[str, object]) -> None:
+    with pytest.raises(ValueError, match="evaluation"):
+        AppConfig.model_validate({"evaluation": override})

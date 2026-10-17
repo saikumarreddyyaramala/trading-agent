@@ -20,6 +20,8 @@ from trading_agent.agents.critic import CriticResult
 from trading_agent.bootstrap import Container
 from trading_agent.data.errors import MarketDataError
 from trading_agent.domain.models import Evidence, RiskDecision, SymbolData, TradeProposal
+from trading_agent.evaluation.replay import replay_critic
+from trading_agent.evaluation.scorecard import ScorecardBuilder, render_scorecard
 from trading_agent.execution.executor import (
     EntryResult,
     ExecutionDisabledError,
@@ -770,6 +772,113 @@ def critique(
     else:
         _print_critique(result)
     raise typer.Exit(code=1 if result.status == "failed" else 0)
+
+
+def _window(
+    container: Container, start: str | None, end: str | None, first: date | None
+) -> tuple[date, date]:
+    zone = ZoneInfo(container.config.schedule.timezone)
+    try:
+        to_day = date.fromisoformat(end) if end else datetime.now(zone).date()
+        from_day = date.fromisoformat(start) if start else first or to_day - timedelta(days=30)
+    except ValueError as exc:
+        typer.secho(f"Invalid date: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=2) from exc
+    if to_day < from_day:
+        typer.secho("--to is before --from.", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=2)
+    return from_day, to_day
+
+
+def _scorecard_builder(container: Container, store: AuditStore) -> ScorecardBuilder:
+    try:
+        return ScorecardBuilder(store, container.build_market_data(), container.config)
+    except ConfigError as exc:
+        typer.secho(f"Configuration error: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=2) from exc
+
+
+@app.command()
+def evaluate(
+    start: Annotated[
+        str | None, typer.Option("--from", help="YYYY-MM-DD (default: first daily cycle).")
+    ] = None,
+    end: Annotated[str | None, typer.Option("--to", help="YYYY-MM-DD (default: today).")] = None,
+    as_json: Annotated[
+        bool, typer.Option("--json", help="Print JSON instead of Markdown.")
+    ] = False,
+    save: Annotated[
+        bool, typer.Option("--save/--no-save", help="Write reports/evaluation-<to>.md and .json.")
+    ] = True,
+    env: EnvOption = None,
+    config_dir: ConfigDirOption = None,
+) -> None:
+    """Score the paper record against the go/no-go bar. Exit code 0 means GO, 1 NO-GO."""
+    container = _container(env, config_dir)
+    store = _store_or_exit(container)
+    builder = _scorecard_builder(container, store)
+    from_day, to_day = _window(container, start, end, builder.first_cycle_day())
+    card = builder.build(from_day, to_day)
+    markdown = render_scorecard(card)
+    typer.echo(card.model_dump_json(indent=2) if as_json else markdown)
+    if save:
+        folder = Path(container.config.reporting.output_dir)
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+            md_path = folder / f"evaluation-{to_day:%Y-%m-%d}.md"
+            md_path.write_text(markdown, encoding="utf-8")
+            md_path.with_suffix(".json").write_text(
+                card.model_dump_json(indent=2), encoding="utf-8"
+            )
+        except OSError as exc:
+            typer.secho(f"Could not save the scorecard: {exc}", fg=typer.colors.RED, err=True)
+            raise typer.Exit(code=1) from exc
+        typer.secho(f"Saved {md_path}", err=True)
+    raise typer.Exit(code=0 if card.decision == "GO" else 1)
+
+
+@app.command("evaluate-critic")
+def evaluate_critic(
+    start: Annotated[
+        str | None, typer.Option("--from", help="YYYY-MM-DD (default: first daily cycle).")
+    ] = None,
+    end: Annotated[str | None, typer.Option("--to", help="YYYY-MM-DD (default: today).")] = None,
+    as_json: Annotated[bool, typer.Option("--json", help="Machine-readable output.")] = False,
+    env: EnvOption = None,
+    config_dir: ConfigDirOption = None,
+) -> None:
+    """Re-run the current critic over recorded proposals and compare (uses LLM tokens)."""
+    container = _container(env, config_dir)
+    store = _store_or_exit(container)
+    builder = _scorecard_builder(container, store)
+    from_day, to_day = _window(container, start, end, builder.first_cycle_day())
+    try:
+        critic = container.build_critic()
+    except ConfigError as exc:
+        typer.secho(f"Configuration error: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=2) from exc
+    if critic is None:
+        typer.secho(
+            "The critic is disabled (critic.enabled: false).", fg=typer.colors.RED, err=True
+        )
+        raise typer.Exit(code=2)
+    days = [from_day + timedelta(days=i) for i in range((to_day - from_day).days + 1)]
+    result = replay_critic(store, critic, [DailyCycle.run_id(d) for d in days])
+    if as_json:
+        typer.echo(result.model_dump_json(indent=2))
+        return
+    typer.echo(
+        f"Replayed {result.reviewed} proposal(s) from {from_day} to {to_day}: "
+        f"{result.agreed} agree, {result.now_vetoed} now vetoed, "
+        f"{result.now_approved} now approved."
+    )
+    for item in result.items:
+        if item.changed:
+            typer.echo(
+                f"  {item.run_id} {item.symbol}: {item.recorded} -> {item.replayed}. {item.summary}"
+            )
+    for run_id, reason in result.skipped.items():
+        typer.echo(f"  skipped {run_id}: {reason}")
 
 
 @app.command("show-config")

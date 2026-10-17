@@ -57,4 +57,4 @@ real services are opt-in and never run in CI.
   interviewers ask about.
 
 ## Planned decisions
-- 0011: Evaluation method and the go/no-go bar for live trading (Phase 10)
+- 0012: Going live: the $100 cash account and the switches that gate it (Phase 11)
