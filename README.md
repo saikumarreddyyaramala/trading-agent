@@ -23,6 +23,7 @@ risk engine, executes on a broker, and reports the result against the S&P 500.
 | 9 | Critic agent: independent review of every buy, veto only, code-enforced | Done |
 | 10 | Evaluation: scorecard vs SPY, gatekeeper counterfactuals, go/no-go bar | Done |
 | 11 | Go live ($100): live gates, hard cap, cash-account checks (operator switches on) | Done |
+| 12 | Self-learning: daily review turns results into advisory, guarded lessons | Done |
 
 ## Architecture
 
@@ -31,6 +32,7 @@ risk engine, executes on a broker, and reports the result against the S&P 500.
             │                                                          │
  analyst ──► MCP client ──► research tools (read-only)
  critic  ──► reviews the analyst's proposal and tool outputs (veto only)
+ reflector ► reviews the finished day; writes lessons the analyst reads next morning
    │
    └──────► LLMGateway ──► LLMProviderPort ◄── llm/openai_provider.py (default)
                                              ◄── llm/anthropic_provider.py
@@ -48,7 +50,8 @@ Key rules (see [ADR 0001](docs/adr/0001-architecture.md), [ADR 0002](docs/adr/00
 [ADR 0005](docs/adr/0005-risk-engine.md), [ADR 0006](docs/adr/0006-order-execution.md),
 [ADR 0007](docs/adr/0007-audit-trail.md), [ADR 0008](docs/adr/0008-daily-cycle.md),
 [ADR 0009](docs/adr/0009-daily-report.md), [ADR 0010](docs/adr/0010-critic-agent.md),
-[ADR 0011](docs/adr/0011-evaluation.md), and [ADR 0012](docs/adr/0012-going-live.md)):
+[ADR 0011](docs/adr/0011-evaluation.md), [ADR 0012](docs/adr/0012-going-live.md), and
+[ADR 0013](docs/adr/0013-self-learning.md)):
 - The AI has read-only tools; it can never place an order directly. Tool inputs are
   validated and bounded, and each session has a call budget.
 - Every model call goes through the LLM gateway (pinned model, fallback, token caps, logs).
@@ -68,6 +71,8 @@ Key rules (see [ADR 0001](docs/adr/0001-architecture.md), [ADR 0002](docs/adr/00
 - The daily cycle never lets a failure block an exit: a failed step stops new trades,
   but management, the force-close, and reconciliation always run.
 - Market data must pass quality and freshness rules; a symbol with bad data is rejected.
+- The system learns from its own results as advisory lessons only. Lessons can never
+  change a rule, limit, or check, and code rejects any lesson that tries to.
 
 ## Quick start
 
@@ -122,6 +127,9 @@ Ready
 | `uv run trading-agent report` | Today's report (`--date`, `--json`, `--send`); saved to `reports/` |
 | `uv run trading-agent evaluate` | Score the paper record against the go/no-go bar (exit 0 = GO) |
 | `uv run trading-agent evaluate-critic` | Replay the current critic over recorded proposals (uses tokens) |
+| `uv run trading-agent lessons` | What the agent has learned (`--all` includes retired ones) |
+| `uv run trading-agent retire-lesson ID --reason TEXT` | Stop the analyst from seeing a lesson |
+| `uv run trading-agent learn --date 2026-10-15` | Review a finished day now (uses tokens) |
 | `uv run trading-agent live-check --env live` | Check every real-money gate (read-only, places no order) |
 | `uv run trading-agent db upgrade` | Create or migrate the audit database (`DATABASE_URL`) |
 | `uv run trading-agent runs` | Recent runs from the audit trail |
@@ -148,6 +156,7 @@ src/trading_agent/
   orchestration/         the daily cycle: schedule, steps, resume, market calendar
   reporting/             daily report: trade P&L, SPY benchmark, Markdown/JSON, webhook
   evaluation/            scorecard, go/no-go criteria, counterfactuals, critic replay
+  learning/              daily review: day record, lessons kept, retired, and expired
   bootstrap.py           composition root
   health.py              pre-flight checks
   cli.py                 `trading-agent` command
@@ -169,7 +178,8 @@ docs/adr/                architecture decision records
 | manage | every minute | take profit, keep the stop in place |
 | close | 15:50 | force-close and verify the account is flat (earlier on half-days) |
 | reconcile | 16:15 | sync final order statuses and fills |
-| report | after reconcile | daily report saved to `reports/`, and sent to `REPORT_WEBHOOK_URL` if set |
+| reflect | after reconcile | review the day and update the analyst's lessons (never affects trades) |
+| report | after reflect | daily report saved to `reports/`, and sent to `REPORT_WEBHOOK_URL` if set |
 
 Each step is recorded once, so a restarted process resumes where it left off.
 
@@ -180,6 +190,25 @@ the analysis and its evidence, the risk decision, the trade's fills and P&L, the
 SPY open-to-close move for comparison, and performance to date. Only trades placed by the
 daily cycle count toward performance. Set your LLM prices under `reporting:` in
 `config/base.yaml` to see cost in dollars as well as tokens.
+
+## Self-learning
+
+After each trading day the reflect step reviews what actually happened: the proposal,
+the critic's verdict, the risk checks, the trade against SPY, and what a stopped idea
+would have returned. It writes at most two short lessons, for example "check pre-market
+volume before trusting a gap-up". The analyst reads the active lessons the next morning,
+after its rules, as advice.
+
+The guardrails (ADR 0013):
+- Lessons cannot change rules, limits, sizing, stops, or the critic. Code rejects any
+  lesson that tries to.
+- The reviewer never sees raw news, so a headline cannot plant a lasting instruction.
+- Memory stays small: at most 15 active lessons, each expiring after 60 days.
+  Contradicted lessons are retired.
+
+Every analysis records which lessons it used, and the daily report shows what was
+learned and retired. Review them with `trading-agent lessons`. Turn learning off with
+`learning.enabled: false`.
 
 ## Evaluation: the bar for real money
 

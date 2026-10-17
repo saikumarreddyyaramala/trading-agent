@@ -21,7 +21,7 @@ from tests.conftest import (
 from trading_agent.agents.analyst import MAX_TOOL_RESULT_CHARS, AnalystAgent, AnalystResult
 from trading_agent.agents.prompts import PROMPT_VERSION
 from trading_agent.data.collector import MarketDataCollector
-from trading_agent.domain.models import ChatMessage, ToolCall
+from trading_agent.domain.models import ChatMessage, Lesson, ToolCall
 from trading_agent.llm import LLMGateway
 from trading_agent.mcp_server import ALLOWED_TOOLS, ResearchTools, build_server
 from trading_agent.settings.models import AppConfig, LLMConfig, MarketDataConfig
@@ -67,7 +67,12 @@ class _Log:
 
 
 def _run(
-    outcomes: list[Any], *, log: _Log | None = None, tool_budget: int = 100, **analyst: Any
+    outcomes: list[Any],
+    *,
+    log: _Log | None = None,
+    tool_budget: int = 100,
+    lessons: tuple[Lesson, ...] = (),
+    **analyst: Any,
 ) -> tuple[AnalystResult, FakeProvider]:
     market_data = healthy_market_data("AAPL", "MSFT")
     news = FakeNews([make_article("1", ("AAPL",))])
@@ -87,7 +92,12 @@ def _run(
     provider = FakeProvider(outcomes)
     gateway = LLMGateway(provider, LLMConfig(model="primary", fallback_model="backup"))
     agent = AnalystAgent(
-        gateway, build_server(tools), config, clock=lambda: NOW, logger=log or _Log()
+        gateway,
+        build_server(tools),
+        config,
+        clock=lambda: NOW,
+        logger=log or _Log(),
+        lessons=lessons,
     )
     return anyio.run(agent.run), provider
 
@@ -265,3 +275,32 @@ def test_malformed_arguments_keep_their_message() -> None:
     broken = ToolCall(id="x1", name="get_quote", arguments_json="{oops")
     result, _ = _run([(broken,), NO_TRADE])
     assert result.tool_calls[0].result == "arguments must be a JSON object"
+
+
+# ---------- Lessons (self-learning) ----------
+
+
+def _lesson(lesson_id: int, text: str) -> Lesson:
+    return Lesson(
+        id=lesson_id,
+        text=text,
+        category="research",
+        source_run_id=None,
+        created_at=NOW,
+        expires_at=NOW,
+    )
+
+
+def test_lessons_reach_the_prompt_and_are_recorded() -> None:
+    lessons = (_lesson(3, "Distrust single-source news."), _lesson(5, "Check volume first."))
+    result, provider = _run([NO_TRADE], lessons=lessons)
+    system = provider.requests[0].system
+    assert "Lessons from your own past results" in system
+    assert "- [research, 2026-10-15] Distrust single-source news." in system
+    assert result.lesson_ids == (3, 5)
+
+
+def test_no_lessons_no_lessons_section() -> None:
+    result, provider = _run([NO_TRADE])
+    assert "Lessons from your own past results" not in provider.requests[0].system
+    assert result.lesson_ids == ()

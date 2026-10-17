@@ -7,7 +7,7 @@ testable with fakes and lets us swap vendors through config.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -15,10 +15,11 @@ import anyio
 
 from trading_agent.agents.analyst import AnalystAgent, ToolCallRecord
 from trading_agent.agents.critic import CriticAgent, CriticResult
+from trading_agent.agents.reflection import Reflector
 from trading_agent.data.alpaca_market_data import AlpacaMarketData
 from trading_agent.data.alpaca_news import AlpacaNews
 from trading_agent.data.collector import MarketDataCollector
-from trading_agent.domain.models import TradeProposal
+from trading_agent.domain.models import Lesson, TradeProposal
 from trading_agent.domain.ports import (
     BrokerPort,
     LLMProviderPort,
@@ -31,6 +32,7 @@ from trading_agent.execution.alpaca_orders import AlpacaOrderExecutor
 from trading_agent.execution.executor import Executor
 from trading_agent.execution.live import blocking_reason, live_readiness
 from trading_agent.health import CheckResult, run_healthchecks
+from trading_agent.learning.service import LearningService
 from trading_agent.llm.anthropic_provider import AnthropicProvider
 from trading_agent.llm.gateway import LLMGateway
 from trading_agent.llm.openai_provider import OpenAIProvider
@@ -50,6 +52,7 @@ from trading_agent.settings.secrets import (
 )
 from trading_agent.storage.database import make_engine
 from trading_agent.storage.store import (
+    AuditError,
     AuditRecorder,
     AuditStore,
     NullAuditStore,
@@ -119,8 +122,46 @@ class Container:
     def build_analyst(self) -> AnalystAgent:
         """A fresh agent per run: its own tool budget, token usage, and audit trail."""
         return AnalystAgent(
-            self.build_llm_gateway(), build_server(self.build_research_tools()), self.config
+            self.build_llm_gateway(),
+            build_server(self.build_research_tools()),
+            self.config,
+            lessons=self.active_lessons(),
         )
+
+    def active_lessons(self) -> list[Lesson]:
+        """What the analyst has learned (ADR 0013). Empty when learning is off or the store
+        cannot be read: lessons are advisory, so their absence never blocks a run."""
+        learning = self.config.learning
+        if not learning.enabled:
+            return []
+        try:
+            return self.build_audit_store().active_lessons(datetime.now(UTC), learning.max_active)
+        except AuditError:
+            return []
+
+    def build_reflector(self) -> Reflector:
+        """The daily reviewer. Its own gateway, so its usage is counted separately."""
+        learning = self.config.learning
+        return Reflector(
+            self.build_llm_gateway(),
+            max_new=learning.max_new_per_day,
+            repair_attempts=learning.repair_attempts,
+        )
+
+    def build_learning_service(self, store: AuditStore | None = None) -> LearningService:
+        return LearningService(
+            store or self.build_audit_store(),
+            self.build_market_data(),
+            self.build_reflector(),
+            self.config,
+        )
+
+    def learn(self, day: date) -> str:
+        """Review `day` and update the lessons. Needs a database: lessons must persist."""
+        store = self.build_audit_store()
+        if isinstance(store, NullAuditStore):
+            return "skipped: no database, so there is nowhere to keep lessons"
+        return self.build_learning_service(store).learn(day)
 
     def build_risk_engine(self) -> RiskEngine:
         return RiskEngine(
@@ -215,6 +256,7 @@ class Container:
             recorder=self.build_recorder(),
             report=self.publish_report,
             critique=critique,
+            reflect=self.learn if self.config.learning.enabled else None,
         )
 
     def publish_report(self, day: date, *, send: bool = True) -> str:

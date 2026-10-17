@@ -1214,3 +1214,119 @@ def test_env_file_selects_a_separate_secrets_file(
 
     monkeypatch.delenv("ENV_FILE")
     assert cli._container(None, config_dir).secrets.live_trading_confirmed is False
+
+
+# ---------- Lessons (self-learning) ----------
+
+
+def _add_lessons(engine: sa.Engine) -> list[int]:
+    from datetime import timedelta
+
+    from trading_agent.storage.store import NewLessonRow
+
+    store = SqlAuditStore(engine, AppConfig())
+    now = datetime.now(UTC)
+    ids = store.record_lessons(
+        None,
+        [
+            NewLessonRow(text="Check volume first.", category="research", evidence={}),
+            NewLessonRow(text="Gap-ups fade by noon.", category="entry", evidence={}),
+        ],
+        expires_at=now + timedelta(days=30),
+        max_active=15,
+    )
+    store.record_lessons(
+        None,
+        [NewLessonRow(text="An expired lesson.", category="market", evidence={})],
+        expires_at=now - timedelta(days=1),
+        max_active=15,
+    )
+    return ids
+
+
+def test_lessons_lists_active_then_all(config_dir: Path, audit_db: sa.Engine) -> None:
+    empty = runner.invoke(cli.app, ["lessons", "--config-dir", str(config_dir)])
+    assert empty.exit_code == 0
+    assert "No lessons yet" in empty.output
+
+    first, second = _add_lessons(audit_db)
+    retired = runner.invoke(
+        cli.app,
+        ["retire-lesson", str(second), "--reason", "too vague", "--config-dir", str(config_dir)],
+    )
+    assert retired.exit_code == 0, retired.output
+    assert f"Retired lesson #{second}." in retired.output
+
+    active = runner.invoke(cli.app, ["lessons", "--config-dir", str(config_dir)])
+    assert "[research] Check volume first." in active.output
+    assert "Gap-ups" not in active.output
+    assert "expired" in active.output  # still active in the table, but past its date
+
+    everything = runner.invoke(cli.app, ["lessons", "--all", "--config-dir", str(config_dir)])
+    assert "retired  [entry] Gap-ups fade by noon." in everything.output
+    assert "retired: by operator: too vague" in everything.output
+
+    as_json = runner.invoke(cli.app, ["lessons", "--json", "--config-dir", str(config_dir)])
+    assert {row["id"] for row in json.loads(as_json.stdout)} >= {first}
+
+
+def test_retire_unknown_lesson_exits_1(config_dir: Path, audit_db: sa.Engine) -> None:
+    result = runner.invoke(
+        cli.app, ["retire-lesson", "999", "--reason", "x", "--config-dir", str(config_dir)]
+    )
+    assert result.exit_code == 1
+    assert "No active lesson #999." in result.output
+
+
+class _Learner:
+    def __init__(self, outcome: str | Exception) -> None:
+        self.outcome = outcome
+        self.days: list[date] = []
+
+    def learn(self, day: date) -> str:
+        self.days.append(day)
+        if isinstance(self.outcome, Exception):
+            raise self.outcome
+        return self.outcome
+
+
+def _use_learner(monkeypatch: pytest.MonkeyPatch, learner: _Learner) -> None:
+    monkeypatch.setattr(Container, "build_learning_service", lambda self, store=None: learner)
+
+
+def test_learn_reviews_a_day(
+    config_dir: Path, monkeypatch: pytest.MonkeyPatch, audit_db: sa.Engine
+) -> None:
+    learner = _Learner("1 new, 0 retired: ok")
+    _use_learner(monkeypatch, learner)
+    result = runner.invoke(
+        cli.app, ["learn", "--date", "2026-10-15", "--config-dir", str(config_dir)]
+    )
+    assert result.exit_code == 0, result.output
+    assert "daily-20261015: 1 new, 0 retired: ok" in result.output
+    assert learner.days == [date(2026, 10, 15)]
+
+
+def test_learn_failure_and_bad_input(
+    config_dir: Path, monkeypatch: pytest.MonkeyPatch, audit_db: sa.Engine
+) -> None:
+    from trading_agent.learning import LearningError
+
+    no_key = runner.invoke(cli.app, ["learn", "--config-dir", str(config_dir)])
+    assert no_key.exit_code == 2
+    assert "Configuration error" in no_key.output
+
+    _use_learner(monkeypatch, _Learner(LearningError("reflector unavailable: boom")))
+    failed = runner.invoke(cli.app, ["learn", "--config-dir", str(config_dir)])
+    assert failed.exit_code == 1
+    assert "Review failed: reflector unavailable: boom" in failed.output
+
+    bad = runner.invoke(cli.app, ["learn", "--date", "soon", "--config-dir", str(config_dir)])
+    assert bad.exit_code == 2
+
+
+def test_lesson_commands_need_a_database(config_dir: Path) -> None:
+    for args in (["lessons"], ["retire-lesson", "1", "--reason", "x"], ["learn"]):
+        result = runner.invoke(cli.app, [*args, "--config-dir", str(config_dir)])
+        assert result.exit_code == 2, args
+        assert "DATABASE_URL is not set" in result.output

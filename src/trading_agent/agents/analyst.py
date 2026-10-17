@@ -13,7 +13,7 @@ from __future__ import annotations
 import json
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 from typing import Any, Literal
 
@@ -32,6 +32,7 @@ from trading_agent.agents.evidence import (
 from trading_agent.agents.prompts import PROMPT_VERSION, repair_prompt, system_prompt, task_prompt
 from trading_agent.domain.models import (
     ChatMessage,
+    Lesson,
     LLMRequest,
     LLMUsage,
     ToolCall,
@@ -76,6 +77,8 @@ class AnalystResult(BaseModel):
     usage: LLMUsage
     started_at: datetime
     duration_seconds: float
+    # The lessons the analyst had in context, for judging whether learning helps.
+    lesson_ids: tuple[int, ...] = ()
 
 
 def _result_text(result: CallToolResult) -> str:
@@ -102,7 +105,9 @@ class AnalystAgent:
         *,
         clock: Callable[[], datetime] | None = None,
         logger: Any = None,
+        lessons: Sequence[Lesson] = (),
     ) -> None:
+        self._lessons = tuple(lessons)
         self._gateway = gateway
         self._server = server
         self._config = config
@@ -127,6 +132,7 @@ class AnalystAgent:
                 reason=reason,
                 proposal=proposal,
                 prompt_version=PROMPT_VERSION,
+                lesson_ids=tuple(lesson.id for lesson in self._lessons),
                 turns=turns,
                 tool_calls=tuple(records),
                 usage=self._gateway.total_usage,
@@ -151,7 +157,7 @@ class AnalystAgent:
                 ToolSpec(name=t.name, description=t.description or "", input_schema=t.input_schema)
                 for t in listed.tools
             )
-            system = system_prompt(self._config)
+            system = system_prompt(self._config, self._lessons)
             messages = [
                 ChatMessage(
                     role="user", content=task_prompt(started_at, self._config.schedule.timezone)

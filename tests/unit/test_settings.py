@@ -275,3 +275,26 @@ def test_repo_config_evaluation_bar(config_dir: Path) -> None:
 def test_invalid_evaluation_settings_are_rejected(override: dict[str, object]) -> None:
     with pytest.raises(ValueError, match="evaluation"):
         AppConfig.model_validate({"evaluation": override})
+
+
+def test_repo_config_learning(config_dir: Path) -> None:
+    learning = load_config("paper", config_dir).learning
+    assert learning.enabled
+    assert (learning.max_new_per_day, learning.max_active, learning.lesson_ttl_days) == (2, 15, 60)
+    assert learning.repair_attempts == 1
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        {"max_new_per_day": 4},  # a flood of lessons from one day is noise
+        {"max_active": 0},
+        {"max_active": 51},
+        {"lesson_ttl_days": 1},
+        {"repair_attempts": 3},
+        {"rules": "anything"},  # unknown keys: learning has no way to change rules
+    ],
+)
+def test_invalid_learning_settings_are_rejected(override: dict[str, object]) -> None:
+    with pytest.raises(ValueError, match="learning"):
+        AppConfig.model_validate({"learning": override})

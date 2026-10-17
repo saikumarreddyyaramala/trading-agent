@@ -24,6 +24,7 @@ from trading_agent.storage import schema
 from trading_agent.storage.store import (
     AuditError,
     AuditRecorder,
+    NewLessonRow,
     NullAuditStore,
     SqlAuditStore,
     order_role,
@@ -505,3 +506,112 @@ def test_null_store_has_no_critiques() -> None:
     assert store.get_critique("r1") is None
     assert store.tool_calls("r1") == []
     assert store.analysis_totals("x")["critiques"] == 0
+
+
+# ---------- Lessons (self-learning) ----------
+
+
+def _lesson(text: str, category: str = "research") -> NewLessonRow:
+    return NewLessonRow(text=text, category=category, evidence={"run_id": "r1"})
+
+
+def test_lessons_round_trip_with_their_run(db_engine: sa.Engine) -> None:
+    store = _store(db_engine)
+    store.start_run("r1", "daily")
+    store.record_analysis(_analysis())
+    expires = NOW + timedelta(days=60)
+    ids = store.record_lessons(
+        "r1", [_lesson("Distrust single-source news.")], expires_at=expires, max_active=5
+    )
+    [lesson] = store.active_lessons(NOW, 10)
+    assert lesson.id == ids[0]
+    assert lesson.text == "Distrust single-source news."
+    assert lesson.category == "research"
+    assert lesson.source_run_id == "r1"
+    assert lesson.expires_at == expires
+    [row] = store.list_lessons(include_retired=False)
+    assert row["evidence"] == {"run_id": "r1"}
+    assert row["status"] == "active"
+
+
+def test_lessons_from_an_unknown_run_are_kept_without_it(db_engine: sa.Engine) -> None:
+    store = _store(db_engine)
+    store.record_lessons(
+        "nope", [_lesson("Check volume first.")], expires_at=NOW + timedelta(days=5), max_active=5
+    )
+    assert store.active_lessons(NOW, 10)[0].source_run_id is None
+
+
+def test_active_lessons_are_newest_first_limited_and_unexpired(db_engine: sa.Engine) -> None:
+    store = _store(db_engine)
+    later = NOW + timedelta(days=60)
+    store.record_lessons(None, [_lesson("Old lesson one.")], expires_at=later, max_active=10)
+    store.record_lessons(None, [_lesson("New lesson two.")], expires_at=later, max_active=10)
+    store.record_lessons(
+        None, [_lesson("Expiring lesson.")], expires_at=NOW + timedelta(days=1), max_active=10
+    )
+    assert [x.text for x in store.active_lessons(NOW, 2)] == ["Expiring lesson.", "New lesson two."]
+    future = [x.text for x in store.active_lessons(NOW + timedelta(days=2), 10)]
+    assert future == ["New lesson two.", "Old lesson one."]
+
+
+def test_capacity_retires_the_oldest_lessons(db_engine: sa.Engine) -> None:
+    store = _store(db_engine)
+    later = NOW + timedelta(days=60)
+    store.record_lessons(
+        None, [_lesson("First lesson."), _lesson("Second lesson.")], expires_at=later, max_active=3
+    )
+    store.record_lessons(
+        None, [_lesson("Third lesson."), _lesson("Fourth lesson.")], expires_at=later, max_active=3
+    )
+    assert [x.text for x in store.active_lessons(NOW, 10)] == [
+        "Fourth lesson.",
+        "Third lesson.",
+        "Second lesson.",
+    ]
+    retired = [x for x in store.list_lessons(include_retired=True) if x["status"] == "retired"]
+    assert [x["text"] for x in retired] == ["First lesson."]
+    assert retired[0]["retired_reason"] == "capacity: replaced by newer lessons"
+    assert retired[0]["retired_at"] is not None
+
+
+def test_retire_lesson_only_once(db_engine: sa.Engine) -> None:
+    store = _store(db_engine)
+    [lesson_id] = store.record_lessons(
+        None, [_lesson("Check volume first.")], expires_at=NOW + timedelta(days=5), max_active=5
+    )
+    assert store.retire_lesson(lesson_id, "contradicted")
+    assert not store.retire_lesson(lesson_id, "again")
+    assert not store.retire_lesson(9999, "missing")
+    assert store.active_lessons(NOW, 10) == []
+    assert store.list_lessons(include_retired=False) == []
+    [row] = store.list_lessons(include_retired=True)
+    assert row["retired_reason"] == "contradicted"
+
+
+def test_analysis_records_the_lessons_it_used(db_engine: sa.Engine) -> None:
+    store = _store(db_engine)
+    store.start_run("r1", "daily")
+    store.record_analysis(_analysis().model_copy(update={"lesson_ids": (3, 5)}))
+    run = store.get_run("r1")
+    assert run is not None
+    assert run["analysis"]["lesson_ids"] == [3, 5]
+
+
+def test_lesson_reads_and_writes_raise_audit_errors_when_unmigrated(tmp_path: Any) -> None:
+    store = _store(sa.create_engine(f"sqlite:///{tmp_path / 'empty.db'}"))
+    with pytest.raises(AuditError, match="could not read lessons"):
+        store.active_lessons(NOW, 5)
+    with pytest.raises(AuditError, match="could not record 1 lesson"):
+        store.record_lessons(None, [_lesson("Check volume first.")], expires_at=NOW, max_active=5)
+
+
+def test_null_store_has_no_lessons() -> None:
+    store = NullAuditStore()
+    assert (
+        store.record_lessons(None, [_lesson("Check volume first.")], expires_at=NOW, max_active=5)
+        == []
+    )
+    assert store.active_lessons(NOW, 5) == []
+    assert not store.retire_lesson(1, "x")
+    assert store.list_lessons(include_retired=True) == []

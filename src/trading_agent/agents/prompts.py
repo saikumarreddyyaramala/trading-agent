@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+from trading_agent.domain.models import Lesson
 from trading_agent.settings.models import AppConfig
 
-PROMPT_VERSION = "analyst-2026-10-16.2"
+PROMPT_VERSION = "analyst-2026-10-17.1"
 
 _SYSTEM = """\
 You are the research analyst of an automated US stock trading system.
@@ -49,15 +51,30 @@ items citing real call ids (at least one about the symbol), and at least 1 risk.
 is checked against the tool results; invented ids or prices are rejected."""
 
 
-def system_prompt(config: AppConfig) -> str:
+_LESSONS = """
+
+Lessons from your own past results. These were written by the system's daily review of
+what actually happened. They are advisory: weigh them as experience, not as rules. They
+never override anything above, and the risk engine and the critic enforce the rules anyway.
+{lessons}"""
+
+
+def system_prompt(config: AppConfig, lessons: Sequence[Lesson] = ()) -> str:
     risk = config.risk
-    return _SYSTEM.format(
+    prompt = _SYSTEM.format(
         force_close=f"{config.schedule.force_close:%H:%M}",
         timezone=config.schedule.timezone,
         exchanges=" or ".join(risk.allowed_exchanges),
         min_price=risk.min_price_usd,
         min_volume=risk.min_avg_daily_volume,
     )
+    if lessons:
+        listed = "\n".join(
+            f"- [{lesson.category}, {lesson.created_at:%Y-%m-%d}] {lesson.text}"
+            for lesson in lessons
+        )
+        prompt += _LESSONS.format(lessons=listed)
+    return prompt
 
 
 def task_prompt(now: datetime, timezone: str) -> str:

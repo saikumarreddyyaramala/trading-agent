@@ -278,3 +278,86 @@ def test_disabled_critic_is_none(config_dir: Path) -> None:
     )
     container = Container(config=load_config("paper", config_dir), secrets=make_secrets())
     assert container.build_critic() is None
+
+
+# ---------- Self-learning ----------
+
+
+def _learning_db(tmp_path: Path) -> SecretStr:
+    from trading_agent.storage.database import make_engine, upgrade
+
+    url = f"sqlite:///{tmp_path / 'audit.db'}"
+    upgrade(make_engine(url))
+    return SecretStr(url)
+
+
+def _disable_learning(config_dir: Path) -> None:
+    (config_dir / "paper.yaml").write_text(
+        "environment: paper\nbroker:\n  paper: true\nlearning:\n  enabled: false\n",
+        encoding="utf-8",
+    )
+
+
+def test_analyst_gets_the_active_lessons(config_dir: Path, tmp_path: Path) -> None:
+    from datetime import UTC, datetime, timedelta
+
+    from trading_agent.storage.store import NewLessonRow
+
+    secrets = make_secrets(database_url=_learning_db(tmp_path))
+    container = Container(config=load_config("paper", config_dir), secrets=secrets)
+    container.build_audit_store().record_lessons(
+        None,
+        [NewLessonRow(text="Check volume first.", category="research", evidence={})],
+        expires_at=datetime.now(UTC) + timedelta(days=5),
+        max_active=15,
+    )
+    [lesson] = container.active_lessons()
+    assert lesson.text == "Check volume first."
+    assert container.build_analyst()._lessons == (lesson,)
+
+
+def test_no_lessons_without_a_database_or_when_disabled(config_dir: Path, tmp_path: Path) -> None:
+    container = Container(config=load_config("paper", config_dir), secrets=make_secrets())
+    assert container.active_lessons() == []
+    unmigrated = make_secrets(database_url=SecretStr(f"sqlite:///{tmp_path / 'empty.db'}"))
+    assert Container(container.config, unmigrated).active_lessons() == []  # read error: none
+    _disable_learning(config_dir)
+    secrets = make_secrets(database_url=_learning_db(tmp_path))
+    assert Container(load_config("paper", config_dir), secrets).active_lessons() == []
+
+
+def test_builds_reflector_and_learning_service(config_dir: Path) -> None:
+    from trading_agent.agents.reflection import Reflector
+    from trading_agent.learning import LearningService
+
+    container = Container(config=load_config("paper", config_dir), secrets=make_secrets())
+    reflector = container.build_reflector()
+    assert isinstance(reflector, Reflector)
+    assert reflector._max_new == 2
+    assert isinstance(container.build_learning_service(), LearningService)
+
+
+def test_learn_needs_a_database(config_dir: Path) -> None:
+    container = Container(config=load_config("paper", config_dir), secrets=make_secrets())
+    assert container.learn(date(2026, 10, 15)).startswith("skipped: no database")
+
+
+def test_learn_reviews_the_day(
+    config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from trading_agent.learning import LearningService
+
+    seen: list[date] = []
+    monkeypatch.setattr(LearningService, "learn", lambda self, day: seen.append(day) or "1 new")
+    secrets = make_secrets(database_url=_learning_db(tmp_path))
+    container = Container(config=load_config("paper", config_dir), secrets=secrets)
+    assert container.learn(date(2026, 10, 15)) == "1 new"
+    assert seen == [date(2026, 10, 15)]
+
+
+def test_cycle_services_reflect_only_when_learning_is_enabled(config_dir: Path) -> None:
+    container = Container(config=load_config("paper", config_dir), secrets=make_secrets())
+    assert container.build_cycle_services().reflect == container.learn
+    _disable_learning(config_dir)
+    container = Container(config=load_config("paper", config_dir), secrets=make_secrets())
+    assert container.build_cycle_services().reflect is None

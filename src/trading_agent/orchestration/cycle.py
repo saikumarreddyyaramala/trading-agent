@@ -2,6 +2,7 @@
 
     preflight (data_collection) -> analysis (analysis) -> entry (trade_window_start)
     -> manage every minute -> close (force_close) -> reconcile (report)
+    -> reflect (self-learning, ADR 0013) -> report
 
 Rules:
 - One run id per day (`daily-YYYYMMDD`). Every step is recorded once; a restarted process
@@ -39,7 +40,16 @@ from trading_agent.settings.models import AppConfig
 from trading_agent.storage.store import AuditError, AuditRecorder, AuditStore
 
 MAX_SLEEP_SECONDS = 60  # wake at least this often while waiting, to log and stay responsive
-STEPS = ("preflight", "analysis", "critique", "entry", "close", "reconcile", "report")
+STEPS = (
+    "preflight",
+    "analysis",
+    "critique",
+    "entry",
+    "close",
+    "reconcile",
+    "reflect",
+    "report",
+)
 
 
 class ExecutorLike(Protocol):
@@ -67,6 +77,8 @@ class CycleServices:
     critique: Callable[[str, TradeProposal, list[ToolCallRecord]], CriticResult | None] | None = (
         None
     )
+    # Reviews the finished day and updates the analyst's lessons; returns a short description.
+    reflect: Callable[[date], str] | None = None
 
 
 @dataclass(frozen=True)
@@ -239,6 +251,7 @@ class DailyCycle:
             detail = self._details.get("entry")
             status, summary = "no_trade", f"{entry}: {detail}" if detail else entry
         self._record("run result", lambda s: s.finish_run(run_id, status, summary))
+        self._reflect(run_id, session, done)  # never affects the day's trades or result
         self._report(run_id, session, done)  # after the result, so the report includes it
         self._log.info("cycle.day_finished", run_id=run_id, status=status, summary=summary)
         return DayResult(
@@ -431,6 +444,17 @@ class DailyCycle:
             return
         self._record("orders", lambda s: s.record_orders(None, orders))
         self._step(run_id, "reconcile", "ok", f"synced {len(orders)} order(s)", started)
+
+    def _reflect(self, run_id: str, session: Session, done: dict[str, str]) -> None:
+        if "reflect" in done or self._services.reflect is None:
+            return
+        started = self._now()
+        try:
+            detail = self._services.reflect(session.day)
+        except Exception as exc:
+            self._step(run_id, "reflect", "error", str(exc), started)
+            return
+        self._step(run_id, "reflect", "ok", detail, started)
 
     def _report(self, run_id: str, session: Session, done: dict[str, str]) -> None:
         if "report" in done or self._services.report is None:

@@ -358,3 +358,18 @@ class BrokerOrder(_Frozen):
     @property
     def is_filled(self) -> bool:
         return self.status == "filled"
+
+
+# ---------- Learning ----------
+
+
+class Lesson(_Frozen):
+    """Something the system learned from its own results. Advisory text for the analyst:
+    it can never change a rule, a limit, or a check."""
+
+    id: int
+    text: str
+    category: str
+    source_run_id: str | None
+    created_at: datetime
+    expires_at: datetime

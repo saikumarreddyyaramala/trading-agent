@@ -28,6 +28,7 @@ from trading_agent.execution.executor import (
     ManageResult,
 )
 from trading_agent.health import CheckStatus, format_age, overall_ok, run_healthchecks
+from trading_agent.learning.service import LearningError
 from trading_agent.mcp_server.server import build_server
 from trading_agent.observability.logging import configure_logging
 from trading_agent.orchestration.cycle import DailyCycle, DayResult
@@ -775,6 +776,79 @@ def critique(
     else:
         _print_critique(result)
     raise typer.Exit(code=1 if result.status == "failed" else 0)
+
+
+@app.command()
+def lessons(
+    show_all: Annotated[
+        bool, typer.Option("--all", help="Include retired and expired lessons.")
+    ] = False,
+    as_json: Annotated[bool, typer.Option("--json", help="Machine-readable output.")] = False,
+    env: EnvOption = None,
+    config_dir: ConfigDirOption = None,
+) -> None:
+    """What the agent has learned: the lessons the analyst reads each morning (ADR 0013)."""
+    store = _store_or_exit(_container(env, config_dir))
+    rows = store.list_lessons(include_retired=show_all)
+    if as_json:
+        typer.echo(json.dumps(rows, indent=2, default=str))
+        return
+    if not rows:
+        typer.echo("No lessons yet. The daily review adds them after each trading day.")
+        return
+    now = datetime.now(UTC)
+    for row in rows:
+        state = row["status"] if row["status"] != "active" or row["expires_at"] > now else "expired"
+        typer.echo(
+            f"#{row['id']:<4} {row['created_at']:%Y-%m-%d}  {state:<8} "
+            f"[{row['category']}] {row['text']}"
+        )
+        if row["retired_reason"]:
+            typer.echo(f"       retired: {row['retired_reason']}")
+
+
+@app.command("retire-lesson")
+def retire_lesson(
+    lesson_id: Annotated[int, typer.Argument(help="Lesson id from `trading-agent lessons`.")],
+    reason: Annotated[str, typer.Option("--reason", help="Why it is wrong or no longer useful.")],
+    env: EnvOption = None,
+    config_dir: ConfigDirOption = None,
+) -> None:
+    """Retire a lesson so the analyst stops seeing it. The record is kept."""
+    store = _store_or_exit(_container(env, config_dir))
+    if not store.retire_lesson(lesson_id, f"by operator: {reason}"):
+        typer.secho(f"No active lesson #{lesson_id}.", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+    typer.echo(f"Retired lesson #{lesson_id}.")
+
+
+@app.command()
+def learn(
+    day: Annotated[str | None, typer.Option("--date", help="YYYY-MM-DD (default: today).")] = None,
+    env: EnvOption = None,
+    config_dir: ConfigDirOption = None,
+) -> None:
+    """Review a finished day now and update the lessons (uses LLM tokens).
+
+    The daily cycle does this automatically after each day; use this to catch up a day
+    whose review failed."""
+    container = _container(env, config_dir)
+    store = _store_or_exit(container)
+    zone = ZoneInfo(container.config.schedule.timezone)
+    try:
+        when = date.fromisoformat(day) if day else datetime.now(zone).date()
+    except ValueError as exc:
+        typer.secho(f"Invalid date: {day}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=2) from exc
+    try:
+        detail = container.build_learning_service(store).learn(when)
+    except ConfigError as exc:
+        typer.secho(f"Configuration error: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=2) from exc
+    except (LearningError, AuditError) as exc:
+        typer.secho(f"Review failed: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1) from exc
+    typer.echo(f"{DailyCycle.run_id(when)}: {detail}")
 
 
 def _window(

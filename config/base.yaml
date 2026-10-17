@@ -114,3 +114,12 @@ evaluation:
   max_error_day_pct: 5
   max_llm_cost_per_day_usd: 1.00 # needs reporting.llm_usd_per_million_* to be set
   bootstrap_samples: 5000
+
+# Self-learning (ADR 0013): after each day a reviewer turns results into short lessons the
+# analyst reads the next morning. Lessons are advisory and can never change a rule or limit.
+learning:
+  enabled: true
+  max_new_per_day: 2
+  max_active: 15              # older lessons are retired when newer ones arrive
+  lesson_ttl_days: 60         # a lesson expires unless it is learned again
+  repair_attempts: 1

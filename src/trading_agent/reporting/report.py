@@ -68,6 +68,17 @@ class RiskSummary(BaseModel):
     failed_checks: list[str]
 
 
+class LearningSummary(BaseModel):
+    """What the day's review taught (ADR 0013)."""
+
+    model_config = ConfigDict(frozen=True)
+
+    lessons_used: int  # lessons the analyst had in its prompt that morning
+    added: list[str]
+    retired: list[str]
+    active: int
+
+
 class LlmTotals(BaseModel):
     model_config = ConfigDict(frozen=True)
 
@@ -100,6 +111,7 @@ class DailyReport(BaseModel):
     performance: Performance
     llm: LlmTotals
     warnings: list[str]
+    learning: LearningSummary | None = None
 
 
 class ReportBuilder:
@@ -210,6 +222,7 @@ class ReportBuilder:
                 cost_usd=self._cost(totals["input_tokens"], totals["output_tokens"]),
             ),
             warnings=warnings,
+            learning=self._learning(day, run_id, run),
         )
         self._log.info("report.built", day=str(day), run_id=run_id, warnings=len(warnings))
         return report
@@ -236,6 +249,27 @@ class ReportBuilder:
             output_tokens=row["output_tokens"],
             cost_usd=self._cost(row["input_tokens"], row["output_tokens"]),
         )
+
+    def _learning(
+        self, day: date, run_id: str, run: dict[str, Any] | None
+    ) -> LearningSummary | None:
+        if not self._config.learning.enabled:
+            return None
+        try:
+            lessons = self._store.list_lessons(include_retired=True)
+        except AuditError:
+            return None
+        analysis = run["analysis"] if run else None
+        used = len(analysis.get("lesson_ids") or []) if analysis else 0
+        added = [f"[{x['category']}] {x['text']}" for x in lessons if x["source_run_id"] == run_id]
+        retired = [
+            f"[{x['category']}] {x['text']} ({x['retired_reason']})"
+            for x in lessons
+            if x["retired_at"] is not None and x["retired_at"].astimezone(self._zone).date() == day
+        ]
+        now = self._clock()
+        active = sum(1 for x in lessons if x["status"] == "active" and x["expires_at"] > now)
+        return LearningSummary(lessons_used=used, added=added, retired=retired, active=active)
 
     @staticmethod
     def _critic(run: dict[str, Any] | None) -> CriticSummary | None:
@@ -377,6 +411,23 @@ def render_markdown(report: DailyReport) -> str:
         f"Excess return: {_signed(report.excess_pct, ' pts')}.",
         "",
     ]
+
+    learning = report.learning
+    if learning is not None:
+        lines += [
+            "## Learning",
+            f"The analyst used {learning.lessons_used} lesson(s) this morning; "
+            f"{learning.active} active now.",
+            "",
+        ]
+        if learning.added:
+            lines.append("Learned today:")
+            lines += [f"- {text}" for text in learning.added]
+            lines.append("")
+        if learning.retired:
+            lines.append("Retired today:")
+            lines += [f"- {text}" for text in learning.retired]
+            lines.append("")
 
     perf = report.performance
     lines += [

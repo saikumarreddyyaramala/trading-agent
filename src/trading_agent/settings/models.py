@@ -168,6 +168,18 @@ class EvaluationConfig(_Strict):
     bootstrap_samples: int = Field(default=5000, ge=500, le=100_000)
 
 
+class LearningConfig(_Strict):
+    """Self-learning (ADR 0013): a daily review turns results into advisory lessons."""
+
+    enabled: bool = True
+    max_new_per_day: int = Field(default=2, ge=0, le=3)
+    # The analyst sees at most this many; older ones are retired when new ones arrive.
+    max_active: int = Field(default=15, ge=1, le=50)
+    # Markets change: a lesson expires unless re-learned.
+    lesson_ttl_days: int = Field(default=60, ge=5, le=365)
+    repair_attempts: int = Field(default=1, ge=0, le=2)
+
+
 class LiveConfig(_Strict):
     """Extra gates for real money (ADR 0012). Checked by `trading-agent live-check`."""
 
@@ -225,6 +237,7 @@ class AppConfig(_Strict):
     reporting: ReportingConfig = ReportingConfig()
     evaluation: EvaluationConfig = EvaluationConfig()
     live: LiveConfig = LiveConfig()
+    learning: LearningConfig = LearningConfig()
 
     @model_validator(mode="after")
     def _environment_matches_broker(self) -> AppConfig:

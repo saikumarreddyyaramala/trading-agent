@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Sequence
 from datetime import UTC, datetime
 from typing import Any, Protocol
 
@@ -13,13 +13,23 @@ from pydantic import BaseModel, ConfigDict
 from trading_agent import __version__
 from trading_agent.agents.analyst import AnalystResult, ToolCallRecord
 from trading_agent.agents.critic import CriticResult
-from trading_agent.domain.models import BrokerOrder, RiskDecision, TradeProposal
+from trading_agent.domain.models import BrokerOrder, Lesson, RiskDecision, TradeProposal
 from trading_agent.execution.executor import ManageResult
 from trading_agent.observability.logging import get_logger
 from trading_agent.settings.models import AppConfig
 from trading_agent.storage import schema
 
 _RUN_ORDER = re.compile(r"^ta-(?P<run>[A-Za-z0-9-]+)-(?P<role>entry|stop)$")
+
+
+class NewLessonRow(BaseModel):
+    """A lesson to store: what was learned, its category, and the evidence behind it."""
+
+    model_config = ConfigDict(frozen=True)
+
+    text: str
+    category: str
+    evidence: dict[str, Any]
 
 
 class AuditError(RuntimeError):
@@ -96,6 +106,25 @@ class AuditStore(Protocol):
         """The environments (paper, live) this database holds runs for."""
         ...
 
+    def record_lessons(
+        self,
+        run_id: str | None,
+        lessons: Sequence[NewLessonRow],
+        *,
+        expires_at: datetime,
+        max_active: int,
+    ) -> list[int]:
+        """Store new lessons; retire the oldest active ones beyond `max_active`."""
+        ...
+
+    def active_lessons(self, now: datetime, limit: int) -> list[Lesson]:
+        """Unretired, unexpired lessons, newest first."""
+        ...
+
+    def retire_lesson(self, lesson_id: int, reason: str) -> bool: ...
+
+    def list_lessons(self, *, include_retired: bool) -> list[dict[str, Any]]: ...
+
 
 class NullAuditStore:
     """Used when no database is configured: records nothing, finds nothing."""
@@ -152,6 +181,25 @@ class NullAuditStore:
 
     def environments(self) -> set[str]:
         return set()
+
+    def record_lessons(
+        self,
+        run_id: str | None,
+        lessons: Sequence[NewLessonRow],
+        *,
+        expires_at: datetime,
+        max_active: int,
+    ) -> list[int]:
+        return []
+
+    def active_lessons(self, now: datetime, limit: int) -> list[Lesson]:
+        return []
+
+    def retire_lesson(self, lesson_id: int, reason: str) -> bool:
+        return False
+
+    def list_lessons(self, *, include_retired: bool) -> list[dict[str, Any]]:
+        return []
 
 
 class SqlAuditStore:
@@ -228,6 +276,7 @@ class SqlAuditStore:
                     duration_seconds=result.duration_seconds,
                     started_at=result.started_at,
                     proposal=proposal.model_dump(mode="json") if proposal else None,
+                    lesson_ids=list(result.lesson_ids),
                 )
             )
             if result.tool_calls:
@@ -469,6 +518,107 @@ class SqlAuditStore:
             }
 
         return self._read("analysis totals", read)
+
+    def record_lessons(
+        self,
+        run_id: str | None,
+        lessons: Sequence[NewLessonRow],
+        *,
+        expires_at: datetime,
+        max_active: int,
+    ) -> list[int]:
+        table = schema.lessons
+        added: list[int] = []
+
+        def write(connection: sa.Connection) -> None:
+            now = self._clock()
+            owner = run_id if self._run_exists(connection, run_id) else None
+            for lesson in lessons:
+                result = connection.execute(
+                    table.insert().values(
+                        source_run_id=owner,
+                        created_at=now,
+                        expires_at=expires_at,
+                        category=lesson.category,
+                        text=lesson.text,
+                        evidence=lesson.evidence,
+                        status="active",
+                    )
+                )
+                key = result.inserted_primary_key
+                if key is None:  # pragma: no cover - every insert here has a primary key
+                    raise sa.exc.InvalidRequestError("lesson insert returned no id")
+                added.append(int(key[0]))
+            # Keep the memory small: retire the oldest active lessons beyond the cap.
+            active = connection.execute(
+                sa.select(table.c.id)
+                .where(table.c.status == "active", table.c.expires_at > now)
+                .order_by(table.c.created_at.desc(), table.c.id.desc())
+            ).scalars()
+            surplus = list(active)[max_active:]
+            if surplus:
+                connection.execute(
+                    table.update()
+                    .where(table.c.id.in_(surplus))
+                    .values(
+                        status="retired",
+                        retired_at=now,
+                        retired_reason="capacity: replaced by newer lessons",
+                    )
+                )
+
+        self._write(f"{len(lessons)} lesson(s)", write)
+        return added
+
+    def active_lessons(self, now: datetime, limit: int) -> list[Lesson]:
+        table = schema.lessons
+
+        def read(connection: sa.Connection) -> list[Lesson]:
+            query = (
+                sa.select(table)
+                .where(table.c.status == "active", table.c.expires_at > now)
+                .order_by(table.c.created_at.desc(), table.c.id.desc())
+                .limit(limit)
+            )
+            return [
+                Lesson(
+                    id=row["id"],
+                    text=row["text"],
+                    category=row["category"],
+                    source_run_id=row["source_run_id"],
+                    created_at=row["created_at"],
+                    expires_at=row["expires_at"],
+                )
+                for row in connection.execute(query).mappings()
+            ]
+
+        return self._read("lessons", read)
+
+    def retire_lesson(self, lesson_id: int, reason: str) -> bool:
+        table = schema.lessons
+        changed: list[int] = []
+
+        def write(connection: sa.Connection) -> None:
+            result = connection.execute(
+                table.update()
+                .where(table.c.id == lesson_id, table.c.status == "active")
+                .values(status="retired", retired_at=self._clock(), retired_reason=reason[:500])
+            )
+            changed.append(result.rowcount)
+
+        self._write(f"lesson {lesson_id}", write)
+        return bool(changed and changed[0])
+
+    def list_lessons(self, *, include_retired: bool) -> list[dict[str, Any]]:
+        table = schema.lessons
+
+        def read(connection: sa.Connection) -> list[dict[str, Any]]:
+            query = sa.select(table).order_by(table.c.created_at.desc(), table.c.id.desc())
+            if not include_retired:
+                query = query.where(table.c.status == "active")
+            return [dict(row) for row in connection.execute(query).mappings()]
+
+        return self._read("lessons", read)
 
     def environments(self) -> set[str]:
         def read(connection: sa.Connection) -> set[str]:

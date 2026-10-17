@@ -713,6 +713,62 @@ def test_finished_report_is_not_repeated_on_resume(tmp_path: Path) -> None:
     assert calls == []
 
 
+# ---------- The reflect step (self-learning) ----------
+
+
+def test_reflect_runs_after_the_result_and_before_the_report(tmp_path: Path) -> None:
+    h = Harness(tmp_path)
+    order: list[str] = []
+
+    def reflect(day: date) -> str:
+        (run,) = h.rows(schema.runs)
+        order.append(f"reflect {day} {run['status']}")
+        return "1 new, 0 retired: a clean day"
+
+    def report(day: date) -> str:
+        order.append("report")
+        return "saved"
+
+    result = _rebuild(h, reflect=reflect, report=report).run_day(THURSDAY)
+    assert order == [f"reflect {THURSDAY} traded", "report"]
+    assert result.steps["reflect"] == "ok"
+    assert result.status == "traded"
+    (step,) = [s for s in h.rows(schema.run_steps) if s["step"] == "reflect"]
+    assert step["detail"] == "1 new, 0 retired: a clean day"
+
+
+def test_reflect_failure_is_contained(tmp_path: Path) -> None:
+    h = Harness(tmp_path)
+    result = _rebuild(h, reflect=_boom, report=lambda day: "saved").run_day(THURSDAY)
+    assert result.steps["reflect"] == "error"
+    assert result.steps["report"] == "ok"  # a failed review never blocks the report
+    assert result.status == "traded"
+
+
+def test_no_reflect_service_means_no_reflect_step(tmp_path: Path) -> None:
+    h = Harness(tmp_path)
+    assert "reflect" not in h.cycle.run_day(THURSDAY).steps
+
+
+def test_finished_reflect_is_not_repeated_on_resume(tmp_path: Path) -> None:
+    setup = Harness(tmp_path)
+    store = _resumed_store(
+        setup,
+        {
+            "preflight": "ok",
+            "analysis": "no_trade",
+            "entry": "skipped",
+            "close": "ok",
+            "reconcile": "ok",
+            "reflect": "ok",
+        },
+    )
+    h = Harness(tmp_path, start=at(15, 55), store=store)
+    calls: list[date] = []
+    _rebuild(h, reflect=lambda day: calls.append(day) or "x").run_day(THURSDAY)
+    assert calls == []
+
+
 # ---------- The critique step ----------
 
 

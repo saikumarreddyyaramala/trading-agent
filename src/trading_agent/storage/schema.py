@@ -110,6 +110,8 @@ analyses = sa.Table(
     sa.Column("duration_seconds", sa.Float, nullable=False),
     sa.Column("started_at", Timestamp, nullable=False),
     sa.Column("proposal", JSONType),
+    # Ids of the lessons the analyst had in context (added in migration 0004).
+    sa.Column("lesson_ids", JSONType),
 )
 
 tool_calls = sa.Table(
@@ -203,4 +205,20 @@ critiques = sa.Table(
     sa.Column("input_tokens", sa.Integer, nullable=False),
     sa.Column("output_tokens", sa.Integer, nullable=False),
     sa.Column("created_at", Timestamp, nullable=False),
+)
+
+# What the system learned from its own results (migration 0004).
+lessons = sa.Table(
+    "lessons",
+    metadata,
+    sa.Column("id", sa.Integer, primary_key=True, autoincrement=True),
+    sa.Column("source_run_id", sa.String(64), sa.ForeignKey("runs.run_id"), index=True),
+    sa.Column("created_at", Timestamp, nullable=False),
+    sa.Column("expires_at", Timestamp, nullable=False),
+    sa.Column("category", sa.String(16), nullable=False),
+    sa.Column("text", sa.Text, nullable=False),
+    sa.Column("evidence", JSONType, nullable=False),
+    sa.Column("status", sa.String(16), nullable=False),  # active | retired
+    sa.Column("retired_at", Timestamp),
+    sa.Column("retired_reason", sa.Text),
 )

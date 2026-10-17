@@ -518,3 +518,81 @@ def test_report_without_a_critique_has_no_critic_section(store: SqlAuditStore) -
     report = _builder(store).build(DAY)
     assert report.critic is None
     assert "## Critic" not in render_markdown(report)
+
+
+# ---------- Learning ----------
+
+
+def test_report_shows_what_was_learned_and_retired(store: SqlAuditStore) -> None:
+    from datetime import timedelta
+
+    from trading_agent.storage.store import NewLessonRow
+
+    _record_trading_day(store)
+    later = GENERATED + timedelta(days=30)
+    [old] = store.record_lessons(
+        None,
+        [NewLessonRow(text="Gap-ups fade by noon.", category="entry", evidence={})],
+        expires_at=later,
+        max_active=15,
+    )
+    store.record_lessons(
+        RUN,
+        [
+            NewLessonRow(
+                text="Earnings beats held into the close.", category="research", evidence={}
+            )
+        ],
+        expires_at=later,
+        max_active=15,
+    )
+    store.retire_lesson(old, f"contradicted by the review of {RUN}")
+
+    report = _builder(store).build(DAY)
+    assert report.learning is not None
+    assert report.learning.lessons_used == 0
+    assert report.learning.active == 1
+    assert report.learning.added == ["[research] Earnings beats held into the close."]
+    assert report.learning.retired == [
+        f"[entry] Gap-ups fade by noon. (contradicted by the review of {RUN})"
+    ]
+    markdown = render_markdown(report)
+    assert "## Learning" in markdown
+    assert "The analyst used 0 lesson(s) this morning; 1 active now." in markdown
+    assert "Learned today:\n- [research] Earnings beats held into the close." in markdown
+    assert "Retired today:\n- [entry] Gap-ups fade by noon." in markdown
+
+
+def test_report_counts_the_lessons_the_analyst_used(store: SqlAuditStore) -> None:
+    store.start_run(RUN, "daily")
+    store.record_analysis(
+        AnalystResult(
+            run_id=RUN,
+            status="no_trade",
+            reason="nothing qualified",
+            proposal=None,
+            prompt_version="p",
+            turns=1,
+            tool_calls=(),
+            usage=LLMUsage(input_tokens=1, output_tokens=1),
+            started_at=_ny(8, 45),
+            duration_seconds=1,
+            lesson_ids=(1, 2, 3),
+        )
+    )
+    learning = _builder(store).build(DAY).learning
+    assert learning is not None
+    assert (learning.lessons_used, learning.added, learning.retired) == (3, [], [])
+
+
+def test_no_learning_section_when_disabled_or_unreadable(store: SqlAuditStore) -> None:
+    config = AppConfig.model_validate({"learning": {"enabled": False}})
+    report = _builder(store, config=config).build(DAY)
+    assert report.learning is None
+    assert "## Learning" not in render_markdown(report)
+
+    class _Down(NullAuditStore):
+        def list_lessons(self, *, include_retired: bool) -> list[dict[str, Any]]:
+            raise AuditError("db down")
+
+    assert _builder(_Down()).build(DAY).learning is None
