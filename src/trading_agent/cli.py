@@ -783,6 +783,23 @@ def critique(
     raise typer.Exit(code=1 if result.status == "failed" else 0)
 
 
+def _port_busy(host: str, port: int) -> bool:
+    """True when something already listens on host:port (checked before starting)."""
+    import socket
+
+    try:
+        infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    except OSError:
+        return False  # let the server report an unknown host itself
+    family, kind, proto, _, address = infos[0]
+    with socket.socket(family, kind, proto) as probe:
+        try:
+            probe.bind(address)
+        except OSError:
+            return True
+    return False
+
+
 @app.command()
 def dashboard(
     host: Annotated[str, typer.Option("--host", help="Address to listen on.")] = "127.0.0.1",
@@ -803,6 +820,15 @@ def dashboard(
         typer.secho(
             f"Refusing to listen on {host}: the dashboard has no login, so anyone who can "
             "reach it could read your account. Use --allow-network only on a network you trust.",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(code=2)
+    if _port_busy(host, port):
+        typer.secho(
+            f"Port {port} is already in use: the dashboard may already be running (open "
+            f"http://{host}:{port}), or another program has the port. Stop it, or pick "
+            "another with --port, e.g. --port 8766.",
             fg=typer.colors.RED,
             err=True,
         )

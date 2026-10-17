@@ -1557,6 +1557,8 @@ def test_playbooks_commands(config_dir: Path, audit_db: sa.Engine) -> None:
 def test_dashboard_serves_locally(config_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     import uvicorn
 
+    monkeypatch.setattr(cli, "_port_busy", lambda host, port: False)
+
     served: list[dict[str, Any]] = []
     monkeypatch.setattr(uvicorn, "run", lambda app, **kw: served.append(kw))
     result = runner.invoke(cli.app, ["dashboard", "--config-dir", str(config_dir)])
@@ -1570,6 +1572,8 @@ def test_dashboard_refuses_the_network_unless_allowed(
     config_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     import uvicorn
+
+    monkeypatch.setattr(cli, "_port_busy", lambda host, port: False)
 
     served: list[dict[str, Any]] = []
     monkeypatch.setattr(uvicorn, "run", lambda app, **kw: served.append(kw))
@@ -1585,3 +1589,27 @@ def test_dashboard_refuses_the_network_unless_allowed(
     )
     assert allowed.exit_code == 0
     assert served[0]["host"] == "0.0.0.0"
+
+
+def test_dashboard_explains_a_busy_port(config_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import socket
+
+    import uvicorn
+
+    served: list[dict[str, Any]] = []
+    monkeypatch.setattr(uvicorn, "run", lambda app, **kw: served.append(kw))
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as taken:
+        taken.bind(("127.0.0.1", 0))
+        taken.listen(1)
+        port = taken.getsockname()[1]
+        result = runner.invoke(
+            cli.app, ["dashboard", "--port", str(port), "--config-dir", str(config_dir)]
+        )
+    assert result.exit_code == 2
+    assert f"Port {port} is already in use" in result.output
+    assert "--port" in result.output
+    assert served == []
+
+
+def test_an_unknown_host_is_left_for_the_server_to_report() -> None:
+    assert cli._port_busy("no-such-host.invalid", 8765) is False
