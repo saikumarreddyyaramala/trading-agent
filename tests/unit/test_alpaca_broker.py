@@ -128,3 +128,54 @@ def test_position_and_order_errors_are_wrapped() -> None:
         broker.get_positions()
     with pytest.raises(BrokerError, match="could not fetch orders"):
         broker.count_buy_orders_since(datetime(2026, 10, 15, tzinfo=UTC))
+
+
+# ---------- Dashboard support (ADR 0018) ----------
+
+
+class _HistoryClient(_Client):
+    def __init__(self, *, fail: bool = False) -> None:
+        super().__init__(fail=fail)
+        self.requests: list[Any] = []
+
+    def get_account(self) -> Any:
+        account = super().get_account()
+        account.last_equity = "100000"
+        return account
+
+    def get_portfolio_history(self, request: Any) -> Any:
+        self.requests.append(request)
+        if self.fail:
+            raise ConnectionError("network down")
+        return SimpleNamespace(
+            timestamp=[1760533200, 1760533500, 1760533800],
+            equity=[100000.0, None, 100012.5],
+            base_value=100000.0,
+        )
+
+
+def test_last_equity_gives_the_day_change() -> None:
+    account = AlpacaBroker("k", "s", paper=True, client=_HistoryClient()).get_account()
+    assert account.last_equity == Decimal("100000")
+
+
+@pytest.mark.parametrize(
+    ("span", "period", "timeframe"),
+    [("1D", "1D", "5Min"), ("1W", "1W", "1H"), ("1M", "1M", "1D"), ("1Y", "1A", "1D")],
+)
+def test_portfolio_history_by_span(span: str, period: str, timeframe: str) -> None:
+    client = _HistoryClient()
+    history = AlpacaBroker("k", "s", paper=True, client=client).get_portfolio_history(span)
+    assert (client.requests[0].period, client.requests[0].timeframe) == (period, timeframe)
+    assert [p.equity for p in history.points] == [Decimal("100000.0"), Decimal("100012.5")]
+    assert history.points[0].at == datetime(2025, 10, 15, 13, 0, tzinfo=UTC)
+    assert history.base_value == Decimal("100000.0")
+    assert history.span == span
+
+
+def test_portfolio_history_errors_are_wrapped() -> None:
+    broker = AlpacaBroker("k", "s", paper=True, client=_HistoryClient(fail=True))
+    with pytest.raises(BrokerError, match="could not fetch portfolio history"):
+        broker.get_portfolio_history("1D")
+    with pytest.raises(ValueError, match="span"):
+        broker.get_portfolio_history("5Y")

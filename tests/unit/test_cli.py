@@ -4,6 +4,7 @@ import json
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from typing import Any
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -1548,3 +1549,39 @@ def test_playbooks_commands(config_dir: Path, audit_db: sa.Engine) -> None:
     assert again.exit_code == 1
     everything = runner.invoke(cli.app, ["playbooks", "--all", "--config-dir", str(config_dir)])
     assert "retired: by operator: too vague" in everything.output
+
+
+# ---------- dashboard (ADR 0018) ----------
+
+
+def test_dashboard_serves_locally(config_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import uvicorn
+
+    served: list[dict[str, Any]] = []
+    monkeypatch.setattr(uvicorn, "run", lambda app, **kw: served.append(kw))
+    result = runner.invoke(cli.app, ["dashboard", "--config-dir", str(config_dir)])
+    assert result.exit_code == 0, result.output
+    assert served == [{"host": "127.0.0.1", "port": 8765, "log_level": "warning"}]
+    assert "http://127.0.0.1:8765" in result.output
+    assert "read-only" in result.output
+
+
+def test_dashboard_refuses_the_network_unless_allowed(
+    config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import uvicorn
+
+    served: list[dict[str, Any]] = []
+    monkeypatch.setattr(uvicorn, "run", lambda app, **kw: served.append(kw))
+    refused = runner.invoke(
+        cli.app, ["dashboard", "--host", "0.0.0.0", "--config-dir", str(config_dir)]
+    )
+    assert refused.exit_code == 2
+    assert "no login" in refused.output
+    assert served == []
+    allowed = runner.invoke(
+        cli.app,
+        ["dashboard", "--host", "0.0.0.0", "--allow-network", "--config-dir", str(config_dir)],
+    )
+    assert allowed.exit_code == 0
+    assert served[0]["host"] == "0.0.0.0"

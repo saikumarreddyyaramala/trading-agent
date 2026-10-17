@@ -6,16 +6,22 @@ arrives in Phase 5 and will only ever be called after the risk engine approves.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from decimal import Decimal
 from enum import Enum
 from typing import Any
 
 from alpaca.trading.client import TradingClient
 from alpaca.trading.enums import OrderSide, QueryOrderStatus
-from alpaca.trading.requests import GetOrdersRequest
+from alpaca.trading.requests import GetOrdersRequest, GetPortfolioHistoryRequest
 
-from trading_agent.domain.models import AccountSnapshot, MarketClock, Position
+from trading_agent.domain.models import (
+    AccountSnapshot,
+    MarketClock,
+    PortfolioHistory,
+    PortfolioPoint,
+    Position,
+)
 
 # Alpaca returns at most 500 orders per request; far above one trade a day.
 MAX_ORDERS_PER_QUERY = 500
@@ -82,7 +88,13 @@ class AlpacaBroker:
             if account.non_marginable_buying_power in (None, "")
             else _to_decimal(account.non_marginable_buying_power),
             daytrade_count=int(account.daytrade_count or 0),
+            last_equity=None
+            if getattr(account, "last_equity", None) in (None, "")
+            else _to_decimal(account.last_equity),
         )
+
+    def get_portfolio_history(self, span: str) -> PortfolioHistory:
+        return _history(self._client, span)
 
     def get_clock(self) -> MarketClock:
         try:
@@ -124,3 +136,34 @@ class AlpacaBroker:
         except Exception as exc:
             raise BrokerError(f"could not fetch orders: {type(exc).__name__}: {exc}") from exc
         return len(orders)
+
+
+# Dashboard chart spans (ADR 0018): our name -> Alpaca's (period, timeframe).
+HISTORY_SPANS: dict[str, tuple[str, str]] = {
+    "1D": ("1D", "5Min"),
+    "1W": ("1W", "1H"),
+    "1M": ("1M", "1D"),
+    "3M": ("3M", "1D"),
+    "1Y": ("1A", "1D"),
+}
+
+
+def _history(client: Any, span: str) -> PortfolioHistory:
+    if span not in HISTORY_SPANS:
+        raise ValueError(f"unknown span {span!r}: use one of {', '.join(HISTORY_SPANS)}")
+    period, timeframe = HISTORY_SPANS[span]
+    try:
+        raw = client.get_portfolio_history(
+            GetPortfolioHistoryRequest(period=period, timeframe=timeframe)
+        )
+    except Exception as exc:
+        raise BrokerError(
+            f"could not fetch portfolio history: {type(exc).__name__}: {exc}"
+        ) from exc
+    points = tuple(
+        PortfolioPoint(at=datetime.fromtimestamp(int(ts), UTC), equity=_to_decimal(equity))
+        for ts, equity in zip(raw.timestamp or [], raw.equity or [], strict=False)
+        if equity is not None
+    )
+    base = None if raw.base_value is None else _to_decimal(raw.base_value)
+    return PortfolioHistory(span=span, base_value=base, points=points)

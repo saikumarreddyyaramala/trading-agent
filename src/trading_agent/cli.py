@@ -784,6 +784,38 @@ def critique(
 
 
 @app.command()
+def dashboard(
+    host: Annotated[str, typer.Option("--host", help="Address to listen on.")] = "127.0.0.1",
+    port: Annotated[int, typer.Option("--port", min=1024, max=65535)] = 8765,
+    allow_network: Annotated[
+        bool,
+        typer.Option("--allow-network", help="Listen beyond this computer (no login: careful)."),
+    ] = False,
+    env: EnvOption = None,
+    config_dir: ConfigDirOption = None,
+) -> None:
+    """Open the local dashboard: account, positions, charts, news, costs, live activity."""
+    import uvicorn
+
+    from trading_agent.dashboard.app import create_app
+
+    if host not in ("127.0.0.1", "localhost", "::1") and not allow_network:
+        typer.secho(
+            f"Refusing to listen on {host}: the dashboard has no login, so anyone who can "
+            "reach it could read your account. Use --allow-network only on a network you trust.",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(code=2)
+    container = _container(env, config_dir)
+    application = create_app(container.build_dashboard_data())
+    typer.echo(
+        f"Dashboard on http://{host}:{port} (read-only: it never places orders). Ctrl+C stops it."
+    )
+    uvicorn.run(application, host=host, port=port, log_level="warning")
+
+
+@app.command()
 def watch(
     symbols: Annotated[list[str] | None, typer.Argument(help="Extra symbols to scan.")] = None,
     phase: Annotated[

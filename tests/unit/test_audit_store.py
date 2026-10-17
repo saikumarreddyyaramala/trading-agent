@@ -723,3 +723,46 @@ def test_risk_decisions_keep_their_score(db_engine: sa.Engine) -> None:
     assert scored["score"]["total"] == "72.5"
     assert scored["score"]["components"][0]["name"] == "Trend"
     assert unscored["score"] is None
+
+
+# ---------- Activity feed (ADR 0018) ----------
+
+
+def test_activity_merges_steps_orders_exits_and_lessons(db_engine: sa.Engine) -> None:
+    from trading_agent.storage.store import NewLessonRow
+
+    store = _store(db_engine)
+    store.start_run("r1", "daily")
+    store.record_step("r1", "preflight", "ok", "all checks passed", NOW)
+    store.record_orders("r1", [_order(submitted_at=NOW + timedelta(minutes=5))])
+    store.record_position_event(
+        "r1", ManageResult(action="force_close", detail="force close", symbol="AAPL")
+    )
+    store.record_lessons(
+        "r1",
+        [NewLessonRow(text="Check volume.", category="entry", evidence={})],
+        expires_at=NOW + timedelta(days=5),
+        max_active=5,
+    )
+    store.record_guidebook("# g", ["first edition"])
+    items = store.activity_since(NOW - timedelta(hours=1), 50)
+    kinds = [i["kind"] for i in items]
+    assert set(kinds) == {"step", "order", "position", "lesson", "guidebook"}
+    assert [i["at"] for i in items] == sorted((i["at"] for i in items), reverse=True)
+    step = next(i for i in items if i["kind"] == "step")
+    assert step["title"] == "preflight: ok"
+    assert step["run_id"] == "r1"
+    order = next(i for i in items if i["kind"] == "order")
+    assert order["title"] == "buy 0.4899 AAPL (new)"
+    assert len(store.activity_since(NOW - timedelta(hours=1), 2)) == 2
+    assert store.activity_since(NOW + timedelta(days=1), 50) == []
+    assert NullAuditStore().activity_since(NOW, 5) == []
+
+
+def test_sqlite_uses_write_ahead_logging(tmp_path: Any) -> None:
+    from trading_agent.storage.database import make_engine
+
+    engine = make_engine(f"sqlite:///{tmp_path / 'wal.db'}")
+    with engine.connect() as connection:
+        mode = connection.exec_driver_sql("PRAGMA journal_mode").scalar()
+    assert str(mode).lower() == "wal"

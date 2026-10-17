@@ -696,3 +696,26 @@ def test_builds_the_playbook_writer(config_dir: Path) -> None:
 
     container = Container(config=load_config("paper", config_dir), secrets=make_secrets())
     assert isinstance(container.build_playbook_writer(), PlaybookWriter)
+
+
+# ---------- Dashboard (ADR 0018) ----------
+
+
+def test_dashboard_data_without_keys_still_builds(config_dir: Path) -> None:
+    from trading_agent.dashboard.data import DashboardData
+
+    container = Container(
+        config=load_config("paper", config_dir), secrets=make_secrets(alpaca_api_key=None)
+    )
+    data = container.build_dashboard_data()
+    assert isinstance(data, DashboardData)
+    assert data._broker is None
+    assert data._market_data is None
+    assert "broker unavailable: no broker credentials" in data.overview()["errors"]
+
+
+def test_dashboard_data_with_keys(config_dir: Path) -> None:
+    container = Container(config=load_config("paper", config_dir), secrets=make_secrets())
+    data = container.build_dashboard_data()
+    assert data._broker is not None
+    assert data._news is not None

@@ -173,6 +173,11 @@ class AuditStore(Protocol):
         """run_id, started_at, lesson_ids, and playbook of analyses in [start, end)."""
         ...
 
+    def activity_since(self, since: datetime, limit: int) -> list[dict[str, Any]]:
+        """Steps, orders, exits, lessons, and guidebook editions after `since`,
+        newest first (the dashboard's activity feed)."""
+        ...
+
 
 class NullAuditStore:
     """Used when no database is configured: records nothing, finds nothing."""
@@ -292,6 +297,9 @@ class NullAuditStore:
         return None
 
     def analysis_contexts(self, start: datetime, end: datetime) -> list[dict[str, Any]]:
+        return []
+
+    def activity_since(self, since: datetime, limit: int) -> list[dict[str, Any]]:
         return []
 
 
@@ -968,6 +976,95 @@ class SqlAuditStore:
             ]
 
         return self._read("analyses", read)
+
+    def activity_since(self, since: datetime, limit: int) -> list[dict[str, Any]]:
+        s, o, e, lessons, g = (
+            schema.run_steps,
+            schema.orders,
+            schema.position_events,
+            schema.lessons,
+            schema.guidebook_versions,
+        )
+
+        def read(connection: sa.Connection) -> list[dict[str, Any]]:
+            items: list[dict[str, Any]] = []
+            for row in connection.execute(
+                sa.select(s)
+                .where(s.c.finished_at > since)
+                .order_by(s.c.finished_at.desc())
+                .limit(limit)
+            ).mappings():
+                items.append(
+                    {
+                        "kind": "step",
+                        "at": row["finished_at"],
+                        "run_id": row["run_id"],
+                        "title": f"{row['step']}: {row['status']}",
+                        "detail": row["detail"],
+                    }
+                )
+            for row in connection.execute(
+                sa.select(o)
+                .where(o.c.submitted_at > since)
+                .order_by(o.c.submitted_at.desc())
+                .limit(limit)
+            ).mappings():
+                quantity = f"{row['quantity'].normalize():f}"
+                items.append(
+                    {
+                        "kind": "order",
+                        "at": row["submitted_at"],
+                        "run_id": row["run_id"],
+                        "title": f"{row['side']} {quantity} {row['symbol']} ({row['status']})",
+                        "detail": f"{row['role']}, {row['order_type']}",
+                    }
+                )
+            for row in connection.execute(
+                sa.select(e).where(e.c.at > since).order_by(e.c.at.desc()).limit(limit)
+            ).mappings():
+                items.append(
+                    {
+                        "kind": "position",
+                        "at": row["at"],
+                        "run_id": row["run_id"],
+                        "title": f"{row['action']}: {row['symbol'] or 'all'}",
+                        "detail": row["detail"],
+                    }
+                )
+            for row in connection.execute(
+                sa.select(lessons)
+                .where(lessons.c.created_at > since)
+                .order_by(lessons.c.created_at.desc())
+                .limit(limit)
+            ).mappings():
+                items.append(
+                    {
+                        "kind": "lesson",
+                        "at": row["created_at"],
+                        "run_id": row["source_run_id"],
+                        "title": f"learned ({row['category']})",
+                        "detail": row["text"],
+                    }
+                )
+            for row in connection.execute(
+                sa.select(g)
+                .where(g.c.created_at > since)
+                .order_by(g.c.created_at.desc())
+                .limit(limit)
+            ).mappings():
+                items.append(
+                    {
+                        "kind": "guidebook",
+                        "at": row["created_at"],
+                        "run_id": None,
+                        "title": f"guidebook v{row['version']}",
+                        "detail": "; ".join(row["changes"]),
+                    }
+                )
+            items.sort(key=lambda item: item["at"], reverse=True)
+            return items[:limit]
+
+        return self._read("activity", read)
 
     def environments(self) -> set[str]:
         def read(connection: sa.Connection) -> set[str]:

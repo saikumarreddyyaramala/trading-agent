@@ -23,6 +23,7 @@ from trading_agent.domain.models import (
     MarketClock,
     Mover,
     NewsArticle,
+    PortfolioHistory,
     Position,
     Quote,
     Snapshot,
@@ -44,6 +45,10 @@ class BrokerPort(Protocol):
     def get_clock(self) -> MarketClock: ...
 
     def get_positions(self) -> tuple[Position, ...]: ...
+
+    def get_portfolio_history(self, span: str) -> PortfolioHistory:
+        """Account equity over 1D, 1W, 1M, 3M, or 1Y (the dashboard chart)."""
+        ...
 
     def count_buy_orders_since(self, since: datetime) -> int:
         """Buy orders submitted at or after `since`, in any status (filled, open, canceled)."""

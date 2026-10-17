@@ -6,11 +6,12 @@ testable with fakes and lets us swap vendors through config.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 from zoneinfo import ZoneInfo
 
 import anyio
@@ -20,6 +21,7 @@ from trading_agent.agents.critic import CriticAgent, CriticResult
 from trading_agent.agents.playbooks import PlaybookWriter
 from trading_agent.agents.reflection import Reflector
 from trading_agent.costs import CostLedger, CostReport, cost_report
+from trading_agent.dashboard.data import DashboardData
 from trading_agent.data.alpaca_market_data import AlpacaMarketData
 from trading_agent.data.alpaca_news import AlpacaNews
 from trading_agent.data.collector import MarketDataCollector
@@ -67,6 +69,8 @@ from trading_agent.storage.store import (
     SqlAuditStore,
 )
 from trading_agent.watch import MarketWatch, Phase
+
+T = TypeVar("T")
 
 
 @dataclass(frozen=True)
@@ -397,6 +401,24 @@ class Container:
             return self.build_broker().get_clock().next_open.astimezone(zone).date()
 
         return Planner(store, self.config, next_session=next_session).plan(day).summary
+
+    def build_dashboard_data(self) -> DashboardData:
+        """The dashboard's read-only data layer (ADR 0018). Missing keys leave a section
+        empty with a reason, so the dashboard opens even before the keys are set."""
+
+        def optional(build: Callable[[], T]) -> T | None:
+            try:
+                return build()
+            except ConfigError:
+                return None
+
+        return DashboardData(
+            self.build_audit_store(),
+            self.config,
+            broker=optional(self.build_broker),
+            market_data=optional(self.build_market_data),
+            news=optional(self.build_news),
+        )
 
     def brief(self, day: date) -> str | None:
         return morning_brief(self.build_audit_store(), day)

@@ -28,7 +28,7 @@ risk engine, executes on a broker, and reports the result against the S&P 500.
 | 14 | Parametric trade score; up to 3 paper trades a day in separate slots | Done |
 | 15 | Pre-market and after-hours watch; next-day plan; morning brief | Done |
 | 16 | Guidebook (constitution), outcome-scored lessons, playbooks | Done |
-| 17 | Dashboard backend: live stream, news cards, costs | Planned |
+| 17 | Dashboard backend: local read-only API, live stream, news cards, costs | Done |
 | 18 | Dashboard UI (local web app) | Planned |
 
 ## Architecture
@@ -58,8 +58,8 @@ Key rules (see [ADR 0001](docs/adr/0001-architecture.md), [ADR 0002](docs/adr/00
 [ADR 0009](docs/adr/0009-daily-report.md), [ADR 0010](docs/adr/0010-critic-agent.md),
 [ADR 0011](docs/adr/0011-evaluation.md), [ADR 0012](docs/adr/0012-going-live.md),
 [ADR 0013](docs/adr/0013-self-learning.md), [ADR 0014](docs/adr/0014-cost-ledger.md),
-[ADR 0015](docs/adr/0015-trade-score-and-slots.md), [ADR 0016](docs/adr/0016-market-watch-and-plan.md), and
-[ADR 0017](docs/adr/0017-guidebook-and-playbooks.md)):
+[ADR 0015](docs/adr/0015-trade-score-and-slots.md), [ADR 0016](docs/adr/0016-market-watch-and-plan.md),
+[ADR 0017](docs/adr/0017-guidebook-and-playbooks.md), and [ADR 0018](docs/adr/0018-dashboard-api.md)):
 - The AI has read-only tools; it can never place an order directly. Tool inputs are
   validated and bounded, and each session has a call budget.
 - Every model call goes through the LLM gateway (pinned model, fallback, token caps, logs).
@@ -143,6 +143,7 @@ Ready
 | `uv run trading-agent watch AAPL --phase pre` | Scan pre-market (or `post`) moves, news, and catalysts now |
 | `uv run trading-agent plan` | The to-do list the last session left for today (`--date`) |
 | `uv run trading-agent costs` | What running the system cost, per day, agent, and model (`--days`, `--json`) |
+| `uv run trading-agent dashboard` | Local read-only dashboard API and live stream on http://127.0.0.1:8765 |
 | `uv run trading-agent guidebook` | The system's guidebook: core rules, principles, playbooks, record (`--version`, `--save`) |
 | `uv run trading-agent playbooks` | Research procedures it wrote from its lessons (`--all`); `retire-playbook NAME --reason` |
 | `uv run trading-agent lessons` | What the agent has learned (`--all` includes retired ones) |
@@ -178,6 +179,7 @@ src/trading_agent/
   costs/                 cost ledger: exact pricing, daily budget, summaries
   watch/                 pre-market and after-hours scans
   planning/              next-day plan and the analyst's morning brief
+  dashboard/             read-only dashboard API, news cards, live stream
   bootstrap.py           composition root
   health.py              pre-flight checks
   cli.py                 `trading-agent` command
@@ -235,6 +237,15 @@ The guardrails (ADR 0013):
 Every analysis records which lessons it used, and the daily report shows what was
 learned and retired. Review them with `trading-agent lessons`. Turn learning off with
 `learning.enabled: false`.
+
+## Dashboard
+
+`trading-agent dashboard` serves a read-only API on http://127.0.0.1:8765 (ADR 0018). It
+shows the account and day change, positions with live P&L, the equity chart (1D to 1Y),
+today's cycle and the next step, news cards (key facts and catalysts only), the market
+watch and plan, the guidebook, costs, and a live activity stream. It never places orders,
+and it listens only on this computer unless you pass `--allow-network`. Run it next to
+`trading-agent run`. The interface itself is Phase 18.
 
 ## The guidebook
 

@@ -36,6 +36,9 @@ def make_engine(url: str) -> sa.Engine:
     def _enforce_foreign_keys(dbapi_connection: Any, _record: Any) -> None:
         # SQLite ignores foreign keys unless each connection turns them on.
         dbapi_connection.execute("PRAGMA foreign_keys=ON")
+        # Write-ahead logging lets the dashboard read while the cycle writes (ADR 0018).
+        if parsed.database not in (None, "", ":memory:"):
+            dbapi_connection.execute("PRAGMA journal_mode=WAL")
 
     return engine
 

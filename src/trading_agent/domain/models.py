@@ -36,6 +36,20 @@ class AccountSnapshot(_Frozen):
     # Buying power that cannot come from margin; None if the broker did not say.
     non_marginable_buying_power: Decimal | None = None
     daytrade_count: int = 0
+    last_equity: Decimal | None = None  # equity at the previous close
+
+
+class PortfolioPoint(_Frozen):
+    at: datetime
+    equity: Decimal
+
+
+class PortfolioHistory(_Frozen):
+    """Account equity over a span, for the dashboard chart (ADR 0018)."""
+
+    span: str  # 1D | 1W | 1M | 3M | 1Y
+    base_value: Decimal | None
+    points: tuple[PortfolioPoint, ...]
 
 
 class MarketClock(_Frozen):
