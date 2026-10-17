@@ -22,7 +22,9 @@ FACT_CHARS = 200
 MAX_SYMBOLS = 5
 BIG_MOVE_PCT = Decimal(3)
 _TAGS = re.compile(r"<[^>]*>")
-_SENTENCE = re.compile(r"(?<=[.!?])\s")
+# A sentence ends at . ! or ? after a lowercase letter, digit, or closing mark, followed by a
+# space or glued onto a capital ("grows.ASML"). Initials like "U.S." do not end one.
+_SENTENCE = re.compile(r"(?<=[a-z0-9)%\"'][.!?])(?:\s|(?=[A-Z]))")
 
 
 class NewsCard(BaseModel):

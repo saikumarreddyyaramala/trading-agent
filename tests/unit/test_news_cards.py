@@ -88,3 +88,17 @@ def test_any_text_makes_a_bounded_card(headline: str, summary: str) -> None:
     assert len(card.headline) <= 140
     assert len(card.key_fact) <= 200
     assert "<" not in card.key_fact or ">" not in card.key_fact
+
+
+def test_sentences_glued_without_a_space_still_split() -> None:
+    card = news_card(
+        article(summary="Revenue beat as AI demand grows.ASML raised its outlook too."),
+        NOW,
+        moves={},
+        watched=set(),
+    )
+    assert card.key_fact == "Revenue beat as AI demand grows."
+    initials = news_card(
+        article(summary="The U.S. market rose. Then it fell."), NOW, moves={}, watched=set()
+    )
+    assert initials.key_fact == "The U.S. market rose."

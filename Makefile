@@ -1,5 +1,5 @@
 .DEFAULT_GOAL := help
-.PHONY: help install lint format typecheck test test-integration test-paper-orders check healthcheck docker-build docker-healthcheck
+.PHONY: help install lint format typecheck test test-ui test-integration test-paper-orders check healthcheck docker-build docker-healthcheck
 
 help: ## Show available commands
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-20s %s\n", $$1, $$2}'
@@ -28,7 +28,10 @@ test-integration: ## Tests against real Alpaca paper + LLM (needs .env)
 test-paper-orders: ## Round-trip a real order on the PAPER account (market hours)
 	RUN_PAPER_ORDERS=1 uv run pytest -m paper_orders -v -s
 
-check: lint typecheck test ## Everything CI runs
+test-ui: ## Dashboard UI logic tests (Node's built-in runner, no npm packages)
+	node --test tests/js/*.test.mjs
+
+check: lint typecheck test test-ui ## Everything CI runs
 
 healthcheck: ## Pre-flight check using your .env
 	uv run trading-agent healthcheck

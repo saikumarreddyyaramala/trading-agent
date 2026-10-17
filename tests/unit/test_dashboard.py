@@ -313,10 +313,10 @@ def test_the_stream_endpoint_speaks_sse(store: SqlAuditStore) -> None:
     assert payload["environment"] == "paper"
 
 
-def test_the_home_page_points_to_the_api(store: SqlAuditStore) -> None:
+def test_the_home_page_is_the_dashboard(store: SqlAuditStore) -> None:
     response = _client(store).get("/")
     assert response.status_code == 200
-    assert "/api/overview" in response.text
+    assert "/static/app.js" in response.text
     assert response.headers["x-content-type-options"] == "nosniff"
     assert datetime.now(UTC) > NOW
 
@@ -466,3 +466,23 @@ def test_stale_snapshots_give_no_move(store: SqlAuditStore) -> None:
     )
     cards = _data(store, market_data=stale).news(5)
     assert all(c["move_pct"] is None for c in cards)
+
+
+def test_days_before_the_account_was_funded_are_left_out(store: SqlAuditStore) -> None:
+    class _NewAccount(_HistoryBroker):
+        def get_portfolio_history(self, span: str) -> PortfolioHistory:
+            return PortfolioHistory(
+                span=span,
+                base_value=Decimal("0"),
+                points=(
+                    PortfolioPoint(at=NOW - timedelta(days=3), equity=Decimal("0")),
+                    PortfolioPoint(at=NOW - timedelta(days=2), equity=Decimal("0")),
+                    PortfolioPoint(at=NOW - timedelta(days=1), equity=Decimal("100000")),
+                    PortfolioPoint(at=NOW, equity=Decimal("99999.94")),
+                ),
+            )
+
+    history = _data(store, broker=_NewAccount()).history("1M")
+    assert [p["equity"] for p in history["points"]] == ["100000", "99999.94"]
+    assert history["base_value"] == "100000"  # not the unfunded zero
+    assert history["change"] == "-0.06"

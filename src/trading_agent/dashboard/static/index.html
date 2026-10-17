@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark light">
+  <title>Trading agent</title>
+  <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/app.css">
+  <script type="module" src="/static/app.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand"><span class="logo" aria-hidden="true"></span><span>Trading agent</span></div>
+    <div class="status">
+      <span id="env-badge" class="badge">PAPER</span>
+      <span id="market-pill" class="pill">Market</span>
+      <span id="conn" class="conn" title="Live updates"><span class="dot" aria-hidden="true"></span><span id="conn-text">Connecting</span></span>
+      <button id="open-settings" class="icon-btn" type="button" aria-label="Settings and costs" title="Settings and costs">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 8.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7Zm8.9 4.6-1.9-.4a7 7 0 0 1-.6 1.5l1.1 1.6-1.6 1.6-1.6-1.1c-.5.3-1 .5-1.5.6l-.4 1.9h-2.2l-.4-1.9a7 7 0 0 1-1.5-.6l-1.6 1.1-1.6-1.6 1.1-1.6a7 7 0 0 1-.6-1.5l-1.9-.4v-2.2l1.9-.4c.1-.5.3-1 .6-1.5L5.1 6.6l1.6-1.6 1.6 1.1c.5-.3 1-.5 1.5-.6l.4-1.9h2.2l.4 1.9c.5.1 1 .3 1.5.6l1.6-1.1 1.6 1.6-1.1 1.6c.3.5.5 1 .6 1.5l1.9.4v2.2Z"/></svg>
+      </button>
+    </div>
+  </header>
+
+  <div id="banner" class="banner" role="alert" hidden></div>
+
+  <main class="layout">
+    <div class="main-col">
+      <section class="hero" aria-labelledby="hero-label">
+        <h1 id="hero-label" class="visually-hidden">Portfolio</h1>
+        <div id="equity" class="equity">—</div>
+        <div class="change-row">
+          <span id="equity-change" class="change flat">—</span>
+          <span id="scrub-time" class="scrub-time"></span>
+        </div>
+        <div class="chart-wrap">
+          <svg id="chart" class="chart" role="img" aria-label="Account value over time"></svg>
+          <div id="chart-empty" class="chart-empty" hidden>No history yet</div>
+        </div>
+        <div id="ranges" class="ranges" role="tablist" aria-label="Chart range">
+          <button type="button" role="tab" data-span="1D" aria-selected="true">1D</button>
+          <button type="button" role="tab" data-span="1W" aria-selected="false">1W</button>
+          <button type="button" role="tab" data-span="1M" aria-selected="false">1M</button>
+          <button type="button" role="tab" data-span="3M" aria-selected="false">3M</button>
+          <button type="button" role="tab" data-span="1Y" aria-selected="false">1Y</button>
+        </div>
+      </section>
+
+      <section class="card" aria-labelledby="today-title">
+        <div class="card-head">
+          <h2 id="today-title">Today</h2>
+          <span id="next-step" class="muted"></span>
+        </div>
+        <ol id="timeline" class="timeline" aria-live="polite"></ol>
+      </section>
+
+      <section class="card" aria-labelledby="positions-title">
+        <div class="card-head"><h2 id="positions-title">Positions</h2><span id="positions-count" class="muted"></span></div>
+        <div id="positions" class="positions"></div>
+      </section>
+
+      <section class="card" aria-labelledby="news-title">
+        <div class="card-head">
+          <h2 id="news-title">News</h2>
+          <div id="news-filters" class="segmented" role="tablist" aria-label="News filter">
+            <button type="button" role="tab" data-filter="all" aria-selected="true">All</button>
+            <button type="button" role="tab" data-filter="watched" aria-selected="false">Watched</button>
+            <button type="button" role="tab" data-filter="major" aria-selected="false">Major</button>
+          </div>
+        </div>
+        <div id="news" class="news-grid"></div>
+      </section>
+
+      <section class="card" aria-labelledby="trades-title">
+        <div class="card-head"><h2 id="trades-title">Trades</h2><span class="muted">last 30 days</span></div>
+        <div id="perf" class="stats"></div>
+        <div class="table-wrap">
+          <table class="table">
+            <thead><tr><th>Day</th><th>Symbol</th><th class="num">Entry</th><th class="num">Exit</th><th class="num">P&amp;L</th><th class="num">Return</th><th>Exit via</th></tr></thead>
+            <tbody id="trades"></tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+
+    <aside class="side-col">
+      <section class="card" aria-labelledby="activity-title">
+        <div class="card-head"><h2 id="activity-title">Activity</h2><span class="muted">live</span></div>
+        <ol id="activity" class="activity" aria-live="polite"></ol>
+      </section>
+
+      <section class="card" aria-labelledby="plan-title">
+        <div class="card-head"><h2 id="plan-title">Plan</h2></div>
+        <div id="plan"></div>
+      </section>
+
+      <section class="card" aria-labelledby="watch-title">
+        <div class="card-head"><h2 id="watch-title">Market watch</h2></div>
+        <div id="watch"></div>
+      </section>
+
+      <section class="card" aria-labelledby="learning-title">
+        <div class="card-head">
+          <h2 id="learning-title">Learning</h2>
+          <button id="open-guidebook" class="link-btn" type="button">Guidebook</button>
+        </div>
+        <div id="learning"></div>
+      </section>
+    </aside>
+  </main>
+
+  <div id="drawer" class="drawer" role="dialog" aria-modal="true" aria-labelledby="settings-title" hidden>
+    <div class="drawer-panel">
+      <div class="panel-head">
+        <h2 id="settings-title">Settings</h2>
+        <button id="close-settings" class="icon-btn" type="button" aria-label="Close settings">✕</button>
+      </div>
+      <section class="panel-section">
+        <h3>Costs</h3>
+        <div id="costs"></div>
+      </section>
+      <section class="panel-section">
+        <h3>Display</h3>
+        <label class="switch"><input id="theme-toggle" type="checkbox"> <span>Light theme</span></label>
+      </section>
+      <section class="panel-section">
+        <h3>System</h3>
+        <dl id="system" class="kv"></dl>
+      </section>
+    </div>
+  </div>
+
+  <div id="guidebook" class="modal" role="dialog" aria-modal="true" aria-labelledby="guidebook-title" hidden>
+    <div class="modal-panel">
+      <div class="panel-head">
+        <h2 id="guidebook-title">Guidebook</h2>
+        <button id="close-guidebook" class="icon-btn" type="button" aria-label="Close guidebook">✕</button>
+      </div>
+      <p id="guidebook-meta" class="muted"></p>
+      <article id="guidebook-body" class="prose"></article>
+    </div>
+  </div>
+
+  <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+</body>
+</html>

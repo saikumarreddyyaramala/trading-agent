@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 from datetime import date
+from pathlib import Path
 from typing import Any
 
 import anyio
@@ -26,26 +27,22 @@ from starlette.applications import Starlette
 from starlette.middleware import Middleware
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 from starlette.requests import Request
-from starlette.responses import HTMLResponse, JSONResponse, Response
-from starlette.routing import Route
+from starlette.responses import FileResponse, JSONResponse, Response
+from starlette.routing import Mount, Route
+from starlette.staticfiles import StaticFiles
 
 from trading_agent.dashboard.data import DashboardData, stream
 
 STREAM_INTERVAL_SECONDS = 3
 
-HOME = """<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><title>Trading agent</title></head>
-<body style="font-family: system-ui, sans-serif; max-width: 40rem; margin: 3rem auto">
-<h1>Trading agent dashboard</h1>
-<p>The interface arrives in Phase 18. The read-only API is live:</p>
-<ul>
-<li><a href="/api/overview">/api/overview</a></li>
-<li><a href="/api/history?span=1D">/api/history?span=1D</a></li>
-<li><a href="/api/news">/api/news</a></li>
-<li><a href="/api/costs">/api/costs</a></li>
-<li><a href="/api/learning">/api/learning</a></li>
-<li><a href="/api/activity">/api/activity</a></li>
-</ul></body></html>"""
+STATIC = Path(__file__).parent / "static"
+
+# The page loads only its own files: no inline scripts, nothing from other origins.
+CONTENT_POLICY = (
+    "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; "
+    "connect-src 'self'; font-src 'self'; object-src 'none'; base-uri 'none'; "
+    "form-action 'none'; frame-ancestors 'none'"
+)
 
 
 class _BadRequest(ValueError):
@@ -79,6 +76,8 @@ class _Headers(BaseHTTPMiddleware):
         response.headers["x-content-type-options"] = "nosniff"
         response.headers.setdefault("cache-control", "no-store")
         response.headers["referrer-policy"] = "no-referrer"
+        response.headers["content-security-policy"] = CONTENT_POLICY
+        response.headers["x-frame-options"] = "DENY"
         return response
 
 
@@ -96,7 +95,7 @@ def create_app(data: DashboardData, *, stream_ticks: int | None = None) -> Starl
         return handle
 
     async def home(request: Request) -> Response:
-        return HTMLResponse(HOME)
+        return FileResponse(STATIC / "index.html", media_type="text/html")
 
     async def live(request: Request) -> Response:
         async def events() -> Any:
@@ -126,5 +125,6 @@ def create_app(data: DashboardData, *, stream_ticks: int | None = None) -> Starl
         Route("/api/activity", endpoint(lambda r: data.activity(_int(r, "limit", 50, 1, 500)))),
         Route("/api/runs/{run_id}", endpoint(lambda r: data.run(r.path_params["run_id"]))),
         Route("/api/stream", live),
+        Mount("/static", StaticFiles(directory=STATIC), name="static"),
     ]
     return Starlette(routes=routes, middleware=[Middleware(_Headers)])

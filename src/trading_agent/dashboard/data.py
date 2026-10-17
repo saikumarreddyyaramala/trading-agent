@@ -290,8 +290,13 @@ class DashboardData:
             return {"span": span, "points": [], "error": "no broker credentials"}
         broker = self._broker
         history = self._cached(f"history:{span}", lambda: broker.get_portfolio_history(span))
+        # Alpaca reports zero equity for the days before the account was funded.
         points = history.points
+        while points and points[0].equity == 0:
+            points = points[1:]
         base = history.base_value or (points[0].equity if points else None)
+        if points and len(points) < len(history.points):
+            base = points[0].equity  # measure from funding, not from the empty account
         change = None if not points or base is None else points[-1].equity - base
         return _obj(
             {
