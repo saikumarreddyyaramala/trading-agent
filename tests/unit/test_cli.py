@@ -1652,3 +1652,132 @@ def test_technicals_command_needs_market_data_keys(config_dir: Path) -> None:
     result = runner.invoke(cli.app, ["technicals", "AAPL", "--config-dir", str(config_dir)])
     assert result.exit_code == 2
     assert "Configuration error" in result.output
+
+
+# ---------- Phone alerts and crash restart (ADR 0021) ----------
+
+
+class _Phone:
+    def __init__(self, fail: bool = False) -> None:
+        self.sent: list[str] = []
+        self.fail = fail
+
+    def send(self, text: str) -> None:
+        from trading_agent.alerts import AlertError
+
+        if self.fail:
+            raise AlertError("telegram rejected the alert: HTTP 401")
+        self.sent.append(text)
+
+
+def _phone(monkeypatch: pytest.MonkeyPatch, fail: bool = False) -> _Phone:
+    from trading_agent.alerts import Alerter
+    from trading_agent.settings.models import AlertsConfig
+
+    phone = _Phone(fail)
+    alerter = Alerter(phone, AlertsConfig(), label="paper")
+    monkeypatch.setattr(Container, "alerter", property(lambda self: alerter))
+    return phone
+
+
+def test_run_announces_the_start(config_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    phone = _phone(monkeypatch)
+    _use_fake_cycle(monkeypatch, TRADED)
+    result = runner.invoke(cli.app, ["run", "--config-dir", str(config_dir)])
+    assert result.exit_code == 0, result.output
+    assert phone.sent == ["[paper] Trading cycle started."]
+
+
+def test_run_restarts_after_a_crash_and_gives_up_on_a_loop(
+    config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import functools
+
+    from trading_agent.orchestration.supervisor import supervise
+
+    phone = _phone(monkeypatch)
+    runs: list[int] = []
+
+    class _Crashing:
+        def __init__(self, services: object, config: object) -> None:
+            pass
+
+        def run_forever(self) -> None:
+            runs.append(1)
+            raise RuntimeError("database is locked")
+
+    monkeypatch.setattr(Container, "build_cycle_services", lambda self: object())
+    monkeypatch.setattr(cli, "DailyCycle", _Crashing)
+    monkeypatch.setattr(cli, "supervise", functools.partial(supervise, sleep=lambda s: None))
+    result = runner.invoke(cli.app, ["run", "--config-dir", str(config_dir)])
+    assert result.exit_code == 1
+    assert len(runs) == 5  # orchestration.max_crashes_per_hour
+    assert "stopped after 5 crashes" in phone.sent[-1]
+    assert "stopped after 5 crashes" in result.output
+
+
+def test_alerts_setup_explains_the_first_step(config_dir: Path) -> None:
+    result = runner.invoke(cli.app, ["alerts-setup", "--config-dir", str(config_dir)])
+    assert result.exit_code == 2
+    assert "TELEGRAM_BOT_TOKEN is not set" in result.output
+    assert "@BotFather" in result.output
+
+
+def test_alerts_setup_lists_the_chats(config_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from trading_agent.alerts import TelegramClient
+
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "1:abc")
+    monkeypatch.setattr(TelegramClient, "find_chats", lambda self: [("987654", "Sai")])
+    result = runner.invoke(cli.app, ["alerts-setup", "--config-dir", str(config_dir)])
+    assert result.exit_code == 0, result.output
+    assert "TELEGRAM_CHAT_ID=987654" in result.output
+    assert "1:abc" not in result.output
+
+
+def test_alerts_setup_with_no_messages_yet(
+    config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from trading_agent.alerts import TelegramClient
+
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "1:abc")
+    monkeypatch.setattr(TelegramClient, "find_chats", lambda self: [])
+    result = runner.invoke(cli.app, ["alerts-setup", "--config-dir", str(config_dir)])
+    assert result.exit_code == 1
+    assert "send your bot a message" in result.output
+
+
+def test_alerts_setup_reports_a_bad_token(
+    config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from trading_agent.alerts import AlertError, TelegramClient
+
+    def rejected(self: object) -> list[tuple[str, str]]:
+        raise AlertError("telegram rejected the alert: HTTP 401")
+
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "1:abc")
+    monkeypatch.setattr(TelegramClient, "find_chats", rejected)
+    result = runner.invoke(cli.app, ["alerts-setup", "--config-dir", str(config_dir)])
+    assert result.exit_code == 1
+    assert "HTTP 401" in result.output
+
+
+def test_alerts_test_sends_one_message(config_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    phone = _phone(monkeypatch)
+    result = runner.invoke(cli.app, ["alerts-test", "--config-dir", str(config_dir)])
+    assert result.exit_code == 0, result.output
+    assert len(phone.sent) == 1
+    assert "test alert" in phone.sent[0]
+    assert "Sent" in result.output
+
+
+def test_alerts_test_reports_a_failure(config_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _phone(monkeypatch, fail=True)
+    result = runner.invoke(cli.app, ["alerts-test", "--config-dir", str(config_dir)])
+    assert result.exit_code == 1
+    assert "not sent" in result.output
+
+
+def test_alerts_test_without_telegram(config_dir: Path) -> None:
+    result = runner.invoke(cli.app, ["alerts-test", "--config-dir", str(config_dir)])
+    assert result.exit_code == 2
+    assert "alerts-setup" in result.output

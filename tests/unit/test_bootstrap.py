@@ -719,3 +719,33 @@ def test_dashboard_data_with_keys(config_dir: Path) -> None:
     data = container.build_dashboard_data()
     assert data._broker is not None
     assert data._news is not None
+
+
+# ---------- Phone alerts (ADR 0021) ----------
+
+
+def test_alerts_are_off_without_telegram_secrets(config_dir: Path) -> None:
+    container = Container(config=load_config("paper", config_dir), secrets=make_secrets())
+    assert not container.alerter.configured
+
+
+def test_alerts_need_both_the_token_and_the_chat(config_dir: Path) -> None:
+    token_only = Container(
+        config=load_config("paper", config_dir),
+        secrets=make_secrets(telegram_bot_token=SecretStr("1:abc")),
+    )
+    assert not token_only.alerter.configured
+    both = Container(
+        config=load_config("paper", config_dir),
+        secrets=make_secrets(
+            telegram_bot_token=SecretStr("1:abc"), telegram_chat_id=SecretStr("42")
+        ),
+    )
+    assert both.alerter.configured
+    assert both.alerter is both.alerter  # one alerter: one dedupe and rate limit
+
+
+def test_the_cycle_alerts_through_the_containers_alerter(config_dir: Path) -> None:
+    container = Container(config=load_config("paper", config_dir), secrets=make_secrets())
+    services = container.build_cycle_services()
+    assert services.alert == container.alerter.notify

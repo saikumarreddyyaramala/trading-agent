@@ -316,6 +316,35 @@ class OrchestrationConfig(_Strict):
     early_close_buffer_minutes: int = Field(default=10, ge=5, le=60)
     # After the force-close, wait this long before checking that the account is flat.
     close_settle_seconds: int = Field(default=30, ge=5, le=300)
+    # Ask Windows not to sleep while the cycle runs (ADR 0021). Closing a laptop lid can
+    # still sleep it: that is a power setting this program does not change.
+    keep_awake: bool = True
+    # Restart the cycle after an unexpected crash; give up after this many in an hour.
+    max_crashes_per_hour: int = Field(default=5, ge=1, le=20)
+
+
+AlertKind = Literal["start", "trade", "exit", "failure", "halt", "report", "crash"]
+ALERT_KINDS: tuple[AlertKind, ...] = (
+    "start",
+    "trade",
+    "exit",
+    "failure",
+    "halt",
+    "report",
+    "crash",
+)
+
+
+class AlertsConfig(_Strict):
+    """Phone alerts over Telegram (ADR 0021). Needs TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID
+    (secrets); without them alerts are silently off."""
+
+    enabled: bool = True
+    events: tuple[AlertKind, ...] = ALERT_KINDS
+    # The same message is not repeated within this many minutes.
+    dedupe_minutes: int = Field(default=60, ge=0, le=1440)
+    # A flood is cut off after this many alerts in an hour.
+    max_per_hour: int = Field(default=20, ge=1, le=200)
 
 
 class ReportingConfig(_Strict):
@@ -357,6 +386,7 @@ class AppConfig(_Strict):
     watch: WatchConfig = WatchConfig()
     guidebook: GuidebookConfig = GuidebookConfig()
     costs: CostsConfig = CostsConfig()
+    alerts: AlertsConfig = AlertsConfig()
 
     @model_validator(mode="after")
     def _environment_matches_broker(self) -> AppConfig:

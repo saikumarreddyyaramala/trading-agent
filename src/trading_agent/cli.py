@@ -18,6 +18,7 @@ import typer
 from trading_agent import __version__
 from trading_agent.agents.analyst import AnalystResult
 from trading_agent.agents.critic import CriticResult
+from trading_agent.alerts import AlertError, TelegramClient
 from trading_agent.bootstrap import Container
 from trading_agent.costs import render_costs
 from trading_agent.data.errors import MarketDataError
@@ -34,6 +35,8 @@ from trading_agent.mcp_server.server import build_server
 from trading_agent.mcp_server.tools import ResearchToolError
 from trading_agent.observability.logging import configure_logging
 from trading_agent.orchestration.cycle import DailyCycle, DayResult
+from trading_agent.orchestration.power import keep_awake
+from trading_agent.orchestration.supervisor import supervise
 from trading_agent.reporting.delivery import DeliveryError, post_webhook, save_report
 from trading_agent.reporting.report import render_markdown
 from trading_agent.settings.loader import ConfigError, load_config
@@ -667,13 +670,77 @@ def run(
         result = cycle.run_day(today)
         _print_day(result)
         raise typer.Exit(code=1 if result.status == "error" else 0)
+    alerter = container.alerter
+    tuning = container.config.orchestration
+    alerter.notify("start", "Trading cycle started.")
+    code = 0
     try:
-        cycle.run_forever()
+        with keep_awake(tuning.keep_awake) as awake:
+            if awake:
+                typer.echo("Keeping the computer awake while the cycle runs (not the lid).")
+
+            def crashed(kind: str, text: str) -> None:
+                typer.secho(text, fg=typer.colors.RED, err=True)
+                alerter.notify("crash", text)
+
+            code = supervise(
+                cycle.run_forever, alert=crashed, max_crashes=tuning.max_crashes_per_hour
+            )
     except KeyboardInterrupt:
         typer.echo(
             "Stopped. Open positions keep their broker-side stop-loss. "
             "Restart `trading-agent run` to resume, or run `trading-agent manage`."
         )
+    raise typer.Exit(code=code)
+
+
+@app.command("alerts-setup")
+def alerts_setup(env: EnvOption = None, config_dir: ConfigDirOption = None) -> None:
+    """Find your Telegram chat id for phone alerts (ADR 0021). Sends nothing."""
+    container = _container(env, config_dir)
+    token = container.telegram_token()
+    if token is None:
+        typer.secho("TELEGRAM_BOT_TOKEN is not set.", fg=typer.colors.RED, err=True)
+        typer.echo(
+            "1. In Telegram, message @BotFather, send /newbot, and follow the steps.\n"
+            "2. Put the token it gives you in .env as TELEGRAM_BOT_TOKEN=...\n"
+            "3. Open your new bot in Telegram and send it any message.\n"
+            "4. Run `trading-agent alerts-setup` again to get your chat id."
+        )
+        raise typer.Exit(code=2)
+    try:
+        chats = TelegramClient(token, None).find_chats()
+    except AlertError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1) from exc
+    if not chats:
+        typer.echo("No messages yet: open your bot in Telegram, send your bot a message, retry.")
+        raise typer.Exit(code=1)
+    typer.echo("Chats that messaged your bot. Put yours in .env:")
+    for chat_id, name in chats:
+        typer.echo(f"  TELEGRAM_CHAT_ID={chat_id}    ({name})")
+    typer.echo("Then run `trading-agent alerts-test`.")
+
+
+@app.command("alerts-test")
+def alerts_test(env: EnvOption = None, config_dir: ConfigDirOption = None) -> None:
+    """Send one test alert to your phone (ADR 0021)."""
+    container = _container(env, config_dir)
+    alerter = container.alerter
+    if not alerter.configured:
+        typer.secho(
+            "Telegram alerts are not set up (or alerts.enabled is false). "
+            "Run `trading-agent alerts-setup`.",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(code=2)
+    stamp = datetime.now(ZoneInfo(container.config.schedule.timezone)).strftime("%H:%M")
+    if alerter.notify("start", f"This is a test alert from your trading bot ({stamp})."):
+        typer.echo("Sent. Check your phone.")
+        return
+    typer.secho("The alert was not sent; see the warning above.", fg=typer.colors.RED, err=True)
+    raise typer.Exit(code=1)
 
 
 @app.command("cycle-status")

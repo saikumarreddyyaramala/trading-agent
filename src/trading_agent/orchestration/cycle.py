@@ -65,6 +65,13 @@ STEPS = (
 )
 
 
+_EXIT_LABELS = {
+    "take_profit": "took profit",
+    "force_close": "closed at the force-close",
+    "flattened": "flattened by the last-resort close",
+}
+
+
 class ExecutorLike(Protocol):
     def enter(self, decision: RiskDecision, run_id: str) -> EntryResult: ...
 
@@ -103,6 +110,8 @@ class CycleServices:
     brief: Callable[[date], str | None] | None = None
     # Promote, retire, and write playbooks; rebuild the guidebook (ADR 0017).
     curate: Callable[[date], str] | None = None
+    # Phone alerts (ADR 0021): (kind, text). Must never raise; guarded anyway.
+    alert: Callable[[str, str], object] | None = None
 
 
 @dataclass(frozen=True)
@@ -216,11 +225,23 @@ class DailyCycle:
         except AuditError:  # required store: already logged; callers decide what to block
             return False
 
+    def _alert(self, kind: str, text: str) -> None:
+        if self._services.alert is None:
+            return
+        try:
+            self._services.alert(kind, text)
+        except Exception as exc:  # an alert never changes what the cycle does
+            self._log.warning("cycle.alert_failed", kind=kind, error=str(exc))
+
     def _step(self, run_id: str, step: str, status: str, detail: str, started: datetime) -> None:
         self._steps.setdefault(run_id, {})[step] = status
         self._details.setdefault(run_id, {})[step] = detail
         self._log.info("cycle.step", run_id=run_id, step=step, status=status, detail=detail)
         self._record(f"step {step}", lambda s: s.record_step(run_id, step, status, detail, started))
+        if status == "failed" and step == "preflight":
+            self._alert("halt", f"Pre-flight failed, no new trades today: {detail}")
+        elif status in ("error", "failed"):
+            self._alert("failure", f"{step} failed: {detail}")
 
     def _record_manage(self, run_id: str, results: tuple[ManageResult, ...]) -> None:
         changes = [r for r in results if r.action not in ("flat", "hold")]
@@ -231,6 +252,14 @@ class DailyCycle:
 
         if changes:
             self._record("position events", record)
+        for result in changes:
+            who = result.symbol or "Positions"
+            if result.action == "error":
+                self._alert("failure", f"{who}: could not close ({result.detail})")
+            elif result.action == "stop_restored":
+                self._alert("failure", f"{who}: stop-loss was missing, restored ({result.detail})")
+            else:
+                self._alert("exit", f"{who}: {_EXIT_LABELS[result.action]} ({result.detail})")
 
     # ---------- The day ----------
 
@@ -253,6 +282,7 @@ class DailyCycle:
             done = dict(store.completed_steps(run_id))
         except AuditError:
             done = {}
+        finished_before = "reconcile" in done  # the day's result was already announced
         # Steps finished before a restart, then this run's as they finish.
         self._steps = {run_id: done}
         self._details = {run_id: {}}
@@ -305,6 +335,8 @@ class DailyCycle:
         self._side_step(run_id, "curate", self._services.curate, session, done)
         self._side_step(run_id, "plan", self._services.plan, session, done)
         self._report(run_id, session, done)  # after the result, so the report includes it
+        if not finished_before:
+            self._alert("report", f"{day}: {status}. {summary}")
         self._log.info("cycle.day_finished", run_id=run_id, status=status, summary=summary)
         return DayResult(
             run_id=run_id, day=day, status=status, summary=summary, steps=dict(self._steps[run_id])
@@ -448,6 +480,11 @@ class DailyCycle:
         self._record("entry orders", lambda s: s.record_orders(run_id, orders))
         self._step(run_id, "entry", entry.status, entry.reason, started)
         if entry.status == "entered":
+            self._alert(
+                "trade",
+                f"Bought {entry.filled_quantity} {entry.symbol} at ${entry.avg_fill_price} "
+                f"({run_id})",
+            )
             return f"entered {entry.filled_quantity} {entry.symbol} at ${entry.avg_fill_price}"
         return None
 

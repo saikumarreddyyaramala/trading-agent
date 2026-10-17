@@ -1223,3 +1223,78 @@ def test_a_failing_curation_is_contained(tmp_path: Path) -> None:
     result = _watched(h, curate=_boom).run_day(THURSDAY)
     assert result.steps["curate"] == "error"
     assert result.steps["plan"] == "ok"
+
+
+# ---------- Phone alerts (ADR 0021) ----------
+
+
+def _with_alerts(h: Harness) -> list[tuple[str, str]]:
+    sent: list[tuple[str, str]] = []
+    _rebuild(h, alert=lambda kind, text: sent.append((kind, text)))
+    return sent
+
+
+def test_a_trading_day_alerts_the_buy_the_exit_and_the_result(tmp_path: Path) -> None:
+    h = Harness(tmp_path)
+    sent = _with_alerts(h)
+    h.cycle.run_day(THURSDAY)
+    assert sent == [
+        ("trade", "Bought 0.4899 AAPL at $102 (daily-20261015)"),
+        ("exit", "AAPL: closed at the force-close (force close)"),
+        ("report", "2026-10-15: traded. entered 0.4899 AAPL at $102"),
+    ]
+
+
+def test_a_failed_preflight_alerts_a_halt(tmp_path: Path) -> None:
+    h = Harness(tmp_path, health_ok=False)
+    sent = _with_alerts(h)
+    h.cycle.run_day(THURSDAY)
+    assert sent[0] == ("halt", "Pre-flight failed, no new trades today: Broker account: blocked")
+    assert sent[-1][0] == "report"
+
+
+def test_a_step_error_alerts_a_failure(tmp_path: Path) -> None:
+    h = Harness(tmp_path)
+    sent: list[tuple[str, str]] = []
+    _rebuild(h, orders_since=_boom, alert=lambda kind, text: sent.append((kind, text)))
+    h.cycle.run_day(THURSDAY)
+    assert ("failure", "reconcile failed: boom") in sent
+
+
+def test_a_position_that_cannot_be_closed_is_alerted(tmp_path: Path) -> None:
+    h = Harness(tmp_path, executor={"stuck": True, "flatten_fails": True})
+    sent = _with_alerts(h)
+    h.cycle.run_day(THURSDAY)
+    kinds = [kind for kind, _ in sent]
+    assert ("failure", "close failed: flatten: close failed") in sent
+    assert ("failure", "Positions: could not close (close failed)") in sent
+    assert sent[-1] == (
+        "report",
+        "2026-10-15: error. positions may still be open after the force-close",
+    )
+    assert kinds.count("report") == 1
+
+
+def test_a_resumed_finished_day_does_not_alert_again(tmp_path: Path) -> None:
+    setup = Harness(tmp_path)
+    store = _resumed_store(
+        setup,
+        {
+            "preflight": "ok",
+            "analysis": "proposed",
+            "entry": "entered",
+            "close": "ok",
+            "reconcile": "ok",
+        },
+    )
+    h = Harness(tmp_path, start=at(16, 0), store=store)
+    sent = _with_alerts(h)
+    h.cycle.run_day(THURSDAY)
+    assert sent == []
+
+
+def test_a_broken_alert_never_affects_the_day(tmp_path: Path) -> None:
+    h = Harness(tmp_path)
+    result = _rebuild(h, alert=_boom).run_day(THURSDAY)
+    assert result.status == "traded"
+    assert result.steps["close"] == "ok"

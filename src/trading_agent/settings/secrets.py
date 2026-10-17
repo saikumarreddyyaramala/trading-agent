@@ -43,6 +43,9 @@ class Secrets(BaseSettings):
     database_url: SecretStr | None = None
     # Optional: where to post the daily report (Slack-compatible incoming webhook).
     report_webhook_url: SecretStr | None = None
+    # Optional: phone alerts through a Telegram bot (ADR 0021).
+    telegram_bot_token: SecretStr | None = None
+    telegram_chat_id: SecretStr | None = None
     live_trading_confirmed: bool = False
 
     def require(self, name: str) -> str:

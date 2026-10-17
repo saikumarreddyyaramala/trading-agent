@@ -10,6 +10,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
+from functools import cached_property
 from pathlib import Path
 from typing import Any, TypeVar
 from zoneinfo import ZoneInfo
@@ -20,6 +21,7 @@ from trading_agent.agents.analyst import AnalystAgent, ToolCallRecord
 from trading_agent.agents.critic import CriticAgent, CriticResult
 from trading_agent.agents.playbooks import PlaybookWriter
 from trading_agent.agents.reflection import Reflector
+from trading_agent.alerts import Alerter, TelegramClient
 from trading_agent.costs import CostLedger, CostReport, cost_report
 from trading_agent.dashboard.data import DashboardData
 from trading_agent.data.alpaca_market_data import AlpacaMarketData
@@ -337,6 +339,7 @@ class Container:
             plan=self.make_plan,
             brief=self.brief,
             curate=self.curate if self.config.guidebook.enabled else None,
+            alert=self.alerter.notify,
         )
 
     # ---------- Market watch and the next-day plan (ADR 0016) ----------
@@ -433,6 +436,22 @@ class Container:
             post_webhook(url, markdown)
             return f"saved {md_path}; sent to the webhook"
         return f"saved {md_path}"
+
+    # ---------- Phone alerts (ADR 0021) ----------
+
+    def telegram_token(self) -> str | None:
+        value = self.secrets.telegram_bot_token
+        return value.get_secret_value() if value and value.get_secret_value() else None
+
+    @cached_property
+    def alerter(self) -> Alerter:
+        """One alerter per process, so its dedupe and hourly cap cover every alert.
+        Silently off unless both TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID are set."""
+        token = self.telegram_token()
+        chat = self.secrets.telegram_chat_id
+        chat_id = chat.get_secret_value() if chat and chat.get_secret_value() else None
+        sender = TelegramClient(token, chat_id) if token and chat_id else None
+        return Alerter(sender, self.config.alerts, label=self.config.environment.value)
 
     def report_webhook_url(self) -> str | None:
         value = self.secrets.report_webhook_url

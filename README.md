@@ -31,6 +31,7 @@ risk engine, executes on a broker, and reports the result against the S&P 500.
 | 17 | Dashboard backend: local read-only API, live stream, news cards, costs | Done |
 | 18 | Dashboard UI: live, Robinhood-inspired local web app | Done |
 | 19 | Technical analysis: 25+ indicators, readings, intraday, a score part | Done |
+| 20 | Telegram phone alerts, keep-awake, crash restart | Done |
 
 ## Architecture
 
@@ -144,6 +145,8 @@ Ready
 | `uv run trading-agent evaluate-critic` | Replay the current critic over recorded proposals (uses tokens) |
 | `uv run trading-agent watch AAPL --phase pre` | Scan pre-market (or `post`) moves, news, and catalysts now |
 | `uv run trading-agent plan` | The to-do list the last session left for today (`--date`) |
+| `uv run trading-agent alerts-setup` | Find your Telegram chat id for phone alerts |
+| `uv run trading-agent alerts-test` | Send one test alert to your phone |
 | `uv run trading-agent technicals AAPL` | Every technical indicator with readings (`--json`; free, no LLM) |
 | `uv run trading-agent costs` | What running the system cost, per day, agent, and model (`--days`, `--json`) |
 | `uv run trading-agent dashboard` | The live dashboard on http://127.0.0.1:8765 (read-only) |
@@ -182,6 +185,7 @@ src/trading_agent/
   learning/              daily review: day record, lessons kept, retired, and expired
   costs/                 cost ledger: exact pricing, daily budget, summaries
   watch/                 pre-market and after-hours scans
+  alerts/                Telegram phone alerts: delivery, dedupe, hourly cap
   planning/              next-day plan and the analyst's morning brief
   dashboard/             read-only dashboard API, news cards, live stream, and the web UI (static/)
   bootstrap.py           composition root
@@ -242,6 +246,32 @@ The guardrails (ADR 0013):
 Every analysis records which lessons it used, and the daily report shows what was
 learned and retired. Review them with `trading-agent lessons`. Turn learning off with
 `learning.enabled: false`.
+
+## Phone alerts, keep-awake, and crash restart
+
+The bot can message your phone on Telegram (ADR 0021). It sends an alert when:
+- the cycle starts;
+- a buy fills, or a position is sold;
+- a step fails, or the pre-flight check halts trading;
+- the day ends (its result);
+- the cycle crashes.
+
+Set it up once:
+1. In Telegram, message **@BotFather**, send `/newbot`, and follow the steps.
+2. Put the token in `.env` as `TELEGRAM_BOT_TOKEN=...`.
+3. Open your new bot and send it any message.
+4. Run `uv run trading-agent alerts-setup` and copy the `TELEGRAM_CHAT_ID=...` line it
+   prints into `.env`.
+5. Run `uv run trading-agent alerts-test`, then restart `trading-agent run`.
+
+Repeats are dropped and alerts are capped per hour (`alerts:` in `config/base.yaml`). A
+failed alert never affects trading.
+
+While `trading-agent run` is running, it asks Windows not to fall asleep. This changes no
+power settings, and closing a laptop lid still sleeps it, so keep the lid open or plugged
+in. If the cycle crashes, it restarts by itself after a short, growing pause. After
+5 crashes in an hour, it stops and tells you. Restarting is safe: finished steps are never
+repeated, and open positions keep their broker-side stop-loss.
 
 ## Dashboard
 

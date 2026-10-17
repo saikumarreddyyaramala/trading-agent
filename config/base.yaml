@@ -100,6 +100,8 @@ orchestration:
   manage_interval_seconds: 60     # how often open positions are managed
   early_close_buffer_minutes: 10  # on half-days, force-close this long before the close
   close_settle_seconds: 30        # wait before verifying the account is flat
+  keep_awake: true                # ask Windows not to sleep while the cycle runs (not the lid)
+  max_crashes_per_hour: 5         # restart after a crash; stop after this many in an hour
 
 # Daily report, written after the close (and on demand: `trading-agent report`).
 reporting:
@@ -180,3 +182,11 @@ guidebook:
   min_lessons_for_playbook: 3
   max_playbooks: 8
   write_playbooks: true
+
+# Phone alerts over Telegram (ADR 0021). Needs TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID in
+# .env; without them alerts are off. Test with `trading-agent alerts-test`.
+alerts:
+  enabled: true
+  events: [start, trade, exit, failure, halt, report, crash]
+  dedupe_minutes: 60           # the same message is not repeated within this window
+  max_per_hour: 20             # a flood of alerts is cut off here
