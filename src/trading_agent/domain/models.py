@@ -286,6 +286,8 @@ class TradeProposal(_Frozen):
     confidence: Literal["low", "medium", "high"]
     evidence: tuple[Evidence, ...] = Field(default=(), max_length=10)
     risks: tuple[str, ...] = Field(default=(), max_length=10)
+    # The playbook the analyst followed, if any (ADR 0017); unknown names are dropped.
+    playbook: str | None = Field(default=None, max_length=40)
 
     @field_validator("symbol")
     @classmethod
@@ -439,6 +441,7 @@ class Lesson(_Frozen):
     source_run_id: str | None
     created_at: datetime
     expires_at: datetime
+    promoted: bool = False  # a principle: proven by results (ADR 0017)
 
 
 # ---------- The next-day plan (ADR 0016) ----------
@@ -459,3 +462,31 @@ class DayPlan(_Frozen):
     created_at: datetime
     items: tuple[PlanItem, ...]
     summary: str
+
+
+# ---------- Playbooks (ADR 0017) ----------
+
+
+class Playbook(_Frozen):
+    """A step-by-step research procedure the system wrote from its own lessons.
+
+    Text for the analyst, never code. It is tried on paper as a candidate, becomes active
+    when its trades do well, and is retired when they do not."""
+
+    id: int | None = None
+    name: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{2,39}$")
+    title: str = Field(min_length=3, max_length=80)
+    when_to_use: str = Field(min_length=3, max_length=300)
+    steps: tuple[str, ...] = Field(min_length=1, max_length=6)
+    category: str = Field(max_length=16)
+    status: Literal["candidate", "active", "retired"]
+    source_lesson_ids: tuple[int, ...] = ()
+    created_at: datetime
+    retired_reason: str | None = None
+
+    @field_validator("steps")
+    @classmethod
+    def _short_steps(cls, steps: tuple[str, ...]) -> tuple[str, ...]:
+        if any(not step.strip() or len(step) > 200 for step in steps):
+            raise ValueError("steps must be 1-200 characters each")
+        return steps

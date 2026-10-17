@@ -1198,3 +1198,28 @@ def test_the_next_day_starts_in_time_for_the_premarket_scan(tmp_path: Path) -> N
     first, second = [t for name, t in h.calls if name == "premarket"]
     assert first == at(8)
     assert second == at(8, 0, date(2026, 10, 16))  # Friday's scan at 08:00, not 08:30
+
+
+# ---------- Curation (ADR 0017) ----------
+
+
+def test_curation_runs_between_the_review_and_the_plan(tmp_path: Path) -> None:
+    h = Harness(tmp_path)
+
+    def curate(day: date) -> str:
+        h.calls.append(("curate", h._now()))
+        return "promoted lesson #3; guidebook v2"
+
+    result = _watched(h, curate=curate).run_day(THURSDAY)
+    order = [name for name, _ in h.calls]
+    assert order[-4:] == ["reflect", "curate", "plan", "report"]
+    assert result.steps["curate"] == "ok"
+    (step,) = [s for s in h.rows(schema.run_steps) if s["step"] == "curate"]
+    assert step["detail"] == "promoted lesson #3; guidebook v2"
+
+
+def test_a_failing_curation_is_contained(tmp_path: Path) -> None:
+    h = Harness(tmp_path)
+    result = _watched(h, curate=_boom).run_day(THURSDAY)
+    assert result.steps["curate"] == "error"
+    assert result.steps["plan"] == "ok"

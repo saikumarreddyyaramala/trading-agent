@@ -17,12 +17,13 @@ import anyio
 
 from trading_agent.agents.analyst import AnalystAgent, ToolCallRecord
 from trading_agent.agents.critic import CriticAgent, CriticResult
+from trading_agent.agents.playbooks import PlaybookWriter
 from trading_agent.agents.reflection import Reflector
 from trading_agent.costs import CostLedger, CostReport, cost_report
 from trading_agent.data.alpaca_market_data import AlpacaMarketData
 from trading_agent.data.alpaca_news import AlpacaNews
 from trading_agent.data.collector import MarketDataCollector
-from trading_agent.domain.models import Lesson, TradeProposal
+from trading_agent.domain.models import Lesson, Playbook, TradeProposal
 from trading_agent.domain.ports import (
     BrokerPort,
     LLMProviderPort,
@@ -35,6 +36,7 @@ from trading_agent.execution.alpaca_orders import AlpacaOrderExecutor
 from trading_agent.execution.executor import Executor
 from trading_agent.execution.live import blocking_reason, live_readiness
 from trading_agent.health import CheckResult, run_healthchecks
+from trading_agent.learning.curator import Curator
 from trading_agent.learning.service import LearningService
 from trading_agent.llm.anthropic_provider import AnthropicProvider
 from trading_agent.llm.gateway import LLMGateway
@@ -133,7 +135,39 @@ class Container:
             build_server(self.build_research_tools()),
             self.config,
             lessons=self.active_lessons(),
+            playbooks=self.offered_playbooks(),
         )
+
+    def offered_playbooks(self) -> list[Playbook]:
+        """Playbooks the analyst may follow (ADR 0017): candidates are tried on paper only."""
+        if not self.config.guidebook.enabled:
+            return []
+        try:
+            playbooks = self.build_audit_store().list_playbooks(include_retired=False)
+        except AuditError:
+            return []
+        return [p for p in playbooks if p.status == "active" or not self.config.is_live]
+
+    def build_playbook_writer(self) -> PlaybookWriter | None:
+        """Drafts playbooks from lessons, on its own gateway (its cost is its own)."""
+        return PlaybookWriter(self.build_llm_gateway())
+
+    def curate(self, day: date) -> str:
+        """Promote and retire by results, write playbooks, and rebuild the guidebook."""
+        if not self.config.guidebook.enabled:
+            return "disabled (guidebook.enabled: false)"
+        store = self.build_audit_store()
+        if isinstance(store, NullAuditStore):
+            return "skipped: no database, so there is nowhere to keep the guidebook"
+        writer = self.build_playbook_writer() if self.config.guidebook.write_playbooks else None
+        result = Curator(store, self.config, writer=writer).curate(day)
+        if result.version:
+            latest = store.latest_guidebook()
+            if latest is not None:
+                folder = Path(self.config.reporting.output_dir)
+                folder.mkdir(parents=True, exist_ok=True)
+                (folder / "guidebook.md").write_text(latest["content"], encoding="utf-8")
+        return result.summary
 
     def active_lessons(self) -> list[Lesson]:
         """What the analyst has learned (ADR 0013). Empty when learning is off or the store
@@ -298,6 +332,7 @@ class Container:
             postmarket=self.postmarket,
             plan=self.make_plan,
             brief=self.brief,
+            curate=self.curate if self.config.guidebook.enabled else None,
         )
 
     # ---------- Market watch and the next-day plan (ADR 0016) ----------

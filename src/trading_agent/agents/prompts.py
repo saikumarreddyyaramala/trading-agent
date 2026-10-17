@@ -6,10 +6,10 @@ from collections.abc import Sequence
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from trading_agent.domain.models import Lesson
+from trading_agent.domain.models import Lesson, Playbook
 from trading_agent.settings.models import AppConfig
 
-PROMPT_VERSION = "analyst-2026-10-17.2"
+PROMPT_VERSION = "analyst-2026-10-17.3"
 
 _SYSTEM = """\
 You are the research analyst of an automated US stock trading system.
@@ -44,12 +44,27 @@ When you are done, reply with ONLY a JSON object, no other text:
   "reference_price": the latest price you saw for the symbol (number) or null,
   "confidence": "low" | "medium" | "high",
   "evidence": [{{"claim": "a specific fact", "source_call_id": "id of the tool call"}}],
-  "risks": ["what could make this trade lose money"]
+  "risks": ["what could make this trade lose money"],
+  "playbook": "the name of the playbook you followed" or null
 }}
 A "buy" needs a symbol, a reference_price taken from the tool results, at least 2 evidence
 items citing real call ids (at least one about the symbol), and at least 1 risk. Your answer
 is checked against the tool results; invented ids or prices are rejected."""
 
+
+_PRINCIPLES = """
+
+Principles proven by your own results. The system promoted these lessons because trades
+made with them in mind did measurably better than trades without. Still advice: they never
+override anything above.
+{principles}"""
+
+_PLAYBOOKS = """
+
+Playbooks: step-by-step research procedures your system wrote from its own experience.
+Candidates are on trial. Follow one when it fits today's situation and put its name in
+"playbook"; otherwise leave "playbook" null. They never override anything above.
+{playbooks}"""
 
 _LESSONS = """
 
@@ -59,7 +74,9 @@ never override anything above, and the risk engine and the critic enforce the ru
 {lessons}"""
 
 
-def system_prompt(config: AppConfig, lessons: Sequence[Lesson] = ()) -> str:
+def system_prompt(
+    config: AppConfig, lessons: Sequence[Lesson] = (), playbooks: Sequence[Playbook] = ()
+) -> str:
     risk = config.risk
     prompt = _SYSTEM.format(
         force_close=f"{config.schedule.force_close:%H:%M}",
@@ -68,12 +85,26 @@ def system_prompt(config: AppConfig, lessons: Sequence[Lesson] = ()) -> str:
         min_price=risk.min_price_usd,
         min_volume=risk.min_avg_daily_volume,
     )
-    if lessons:
+    principles = [lesson for lesson in lessons if lesson.promoted]
+    fresh = [lesson for lesson in lessons if not lesson.promoted]
+    if principles:
+        prompt += _PRINCIPLES.format(
+            principles="\n".join(f"- [{p.category}] {p.text}" for p in principles)
+        )
+    if fresh:
         listed = "\n".join(
-            f"- [{lesson.category}, {lesson.created_at:%Y-%m-%d}] {lesson.text}"
-            for lesson in lessons
+            f"- [{lesson.category}, {lesson.created_at:%Y-%m-%d}] {lesson.text}" for lesson in fresh
         )
         prompt += _LESSONS.format(lessons=listed)
+    if playbooks:
+        blocks = []
+        for playbook in playbooks:
+            steps = "\n".join(f"{i}. {step}" for i, step in enumerate(playbook.steps, start=1))
+            blocks.append(
+                f"### {playbook.name}: {playbook.title} ({playbook.status})\n"
+                f"When to use: {playbook.when_to_use}\n{steps}"
+            )
+        prompt += _PLAYBOOKS.format(playbooks="\n".join(blocks))
     return prompt
 
 

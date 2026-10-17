@@ -312,3 +312,10 @@ def test_watch_times_are_validated() -> None:
         AppConfig.model_validate({"schedule": {"premarket_watch": "08:30"}})
     with pytest.raises(ValueError, match="post_market must not come before"):
         AppConfig.model_validate({"schedule": {"post_market": "16:00"}})
+
+
+def test_repo_config_guidebook(config_dir: Path) -> None:
+    guidebook = load_config("paper", config_dir).guidebook
+    assert guidebook.enabled
+    assert (guidebook.min_trades, guidebook.playbook_min_trades) == (10, 5)
+    assert guidebook.write_playbooks

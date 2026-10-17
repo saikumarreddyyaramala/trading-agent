@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -817,3 +817,24 @@ def test_after_hours_alerts_and_an_unreadable_watch(store: SqlAuditStore) -> Non
     report = _builder(store).build(DAY)
     assert "market watch and plan unavailable: db down" in report.warnings
     assert report.plan_for is None
+
+
+# ---------- Guidebook (ADR 0017) ----------
+
+
+def test_report_shows_todays_guidebook_changes(store: SqlAuditStore) -> None:
+    _record_trading_day(store)
+    store.record_guidebook("# Guidebook", ["promoted lesson #3 to a principle"])
+    report = _builder(store).build(DAY)
+    assert report.guidebook_version == 1
+    assert report.guidebook_changes == ["promoted lesson #3 to a principle"]
+    markdown = render_markdown(report)
+    assert "## Guidebook" in markdown
+    assert "Version 1 today: promoted lesson #3 to a principle." in markdown
+
+
+def test_no_guidebook_section_without_changes_that_day(store: SqlAuditStore) -> None:
+    _record_trading_day(store)
+    report = _builder(store).build(DAY - timedelta(days=1))
+    assert report.guidebook_version is None
+    assert "## Guidebook" not in render_markdown(report)

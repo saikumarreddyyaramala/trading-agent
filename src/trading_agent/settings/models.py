@@ -236,6 +236,25 @@ class WatchConfig(_Strict):
     max_plan_items: int = Field(default=12, ge=1, le=50)
 
 
+class GuidebookConfig(_Strict):
+    """The guidebook (ADR 0017): principles proven by results, playbooks, and versions."""
+
+    enabled: bool = True
+    # Closed trades needed on each side (with the lesson in context, and without) before
+    # a lesson is promoted to a principle or retired for its results.
+    min_trades: int = Field(default=10, ge=1, le=500)
+    promote_lift_pct: Decimal = Field(default=Decimal("0.5"), ge=0)
+    retire_lift_pct: Decimal = Field(default=Decimal("0.5"), ge=0)
+    # Trades a playbook needs before it is judged; below this mean it is retired.
+    playbook_min_trades: int = Field(default=5, ge=1, le=500)
+    playbook_retire_below_pct: Decimal = Decimal("-1.0")
+    # Active lessons in one category that prompt the writer to draft a playbook.
+    min_lessons_for_playbook: int = Field(default=3, ge=2, le=20)
+    max_playbooks: int = Field(default=8, ge=1, le=30)
+    write_playbooks: bool = True
+    history_days: int = Field(default=365, ge=30, le=3650)
+
+
 class LearningConfig(_Strict):
     """Self-learning (ADR 0013): a daily review turns results into advisory lessons."""
 
@@ -335,6 +354,7 @@ class AppConfig(_Strict):
     learning: LearningConfig = LearningConfig()
     scoring: ScoringConfig = ScoringConfig()
     watch: WatchConfig = WatchConfig()
+    guidebook: GuidebookConfig = GuidebookConfig()
     costs: CostsConfig = CostsConfig()
 
     @model_validator(mode="after")

@@ -19,6 +19,7 @@ from trading_agent.domain.models import (
     DayPlan,
     Lesson,
     LLMCallRecord,
+    Playbook,
     RiskDecision,
     TradeProposal,
 )
@@ -154,6 +155,24 @@ class AuditStore(Protocol):
         """The latest plan made at the end of `day`."""
         ...
 
+    def promote_lesson(self, lesson_id: int) -> bool: ...
+
+    def record_playbook(self, playbook: Playbook) -> int: ...
+
+    def list_playbooks(self, *, include_retired: bool) -> list[Playbook]: ...
+
+    def set_playbook_status(self, name: str, status: str, reason: str) -> bool: ...
+
+    def record_guidebook(self, content: str, changes: Sequence[str]) -> int: ...
+
+    def latest_guidebook(self) -> dict[str, Any] | None: ...
+
+    def guidebook(self, version: int) -> dict[str, Any] | None: ...
+
+    def analysis_contexts(self, start: datetime, end: datetime) -> list[dict[str, Any]]:
+        """run_id, started_at, lesson_ids, and playbook of analyses in [start, end)."""
+        ...
+
 
 class NullAuditStore:
     """Used when no database is configured: records nothing, finds nothing."""
@@ -250,6 +269,30 @@ class NullAuditStore:
 
     def plan_from(self, day: date) -> dict[str, Any] | None:
         return None
+
+    def promote_lesson(self, lesson_id: int) -> bool:
+        return False
+
+    def record_playbook(self, playbook: Playbook) -> int:
+        return 0
+
+    def list_playbooks(self, *, include_retired: bool) -> list[Playbook]:
+        return []
+
+    def set_playbook_status(self, name: str, status: str, reason: str) -> bool:
+        return False
+
+    def record_guidebook(self, content: str, changes: Sequence[str]) -> int:
+        return 0
+
+    def latest_guidebook(self) -> dict[str, Any] | None:
+        return None
+
+    def guidebook(self, version: int) -> dict[str, Any] | None:
+        return None
+
+    def analysis_contexts(self, start: datetime, end: datetime) -> list[dict[str, Any]]:
+        return []
 
 
 class SqlAuditStore:
@@ -603,7 +646,11 @@ class SqlAuditStore:
             # Keep the memory small: retire the oldest active lessons beyond the cap.
             active = connection.execute(
                 sa.select(table.c.id)
-                .where(table.c.status == "active", table.c.expires_at > now)
+                .where(
+                    table.c.status == "active",
+                    table.c.expires_at > now,
+                    table.c.promoted_at.is_(None),
+                )
                 .order_by(table.c.created_at.desc(), table.c.id.desc())
             ).scalars()
             surplus = list(active)[max_active:]
@@ -627,8 +674,13 @@ class SqlAuditStore:
         def read(connection: sa.Connection) -> list[Lesson]:
             query = (
                 sa.select(table)
-                .where(table.c.status == "active", table.c.expires_at > now)
-                .order_by(table.c.created_at.desc(), table.c.id.desc())
+                .where(
+                    table.c.status == "active",
+                    sa.or_(table.c.expires_at > now, table.c.promoted_at.is_not(None)),
+                )
+                .order_by(
+                    table.c.promoted_at.is_(None), table.c.created_at.desc(), table.c.id.desc()
+                )
                 .limit(limit)
             )
             return [
@@ -639,6 +691,7 @@ class SqlAuditStore:
                     source_run_id=row["source_run_id"],
                     created_at=row["created_at"],
                     expires_at=row["expires_at"],
+                    promoted=row["promoted_at"] is not None,
                 )
                 for row in connection.execute(query).mappings()
             ]
@@ -770,6 +823,151 @@ class SqlAuditStore:
             return None if row is None else dict(row)
 
         return self._read("plans", read)
+
+    def promote_lesson(self, lesson_id: int) -> bool:
+        table = schema.lessons
+        changed: list[int] = []
+
+        def write(connection: sa.Connection) -> None:
+            result = connection.execute(
+                table.update()
+                .where(
+                    table.c.id == lesson_id,
+                    table.c.status == "active",
+                    table.c.promoted_at.is_(None),
+                )
+                .values(promoted_at=self._clock())
+            )
+            changed.append(result.rowcount)
+
+        self._write(f"promotion of lesson {lesson_id}", write)
+        return bool(changed and changed[0])
+
+    def record_playbook(self, playbook: Playbook) -> int:
+        ids: list[int] = []
+
+        def write(connection: sa.Connection) -> None:
+            now = self._clock()
+            result = connection.execute(
+                schema.playbooks.insert().values(
+                    name=playbook.name,
+                    title=playbook.title,
+                    when_to_use=playbook.when_to_use,
+                    steps=list(playbook.steps),
+                    category=playbook.category,
+                    status=playbook.status,
+                    source_lesson_ids=list(playbook.source_lesson_ids),
+                    created_at=playbook.created_at,
+                    updated_at=now,
+                )
+            )
+            key = result.inserted_primary_key
+            ids.append(int(key[0]) if key else 0)
+
+        self._write(f"playbook {playbook.name}", write)
+        return ids[0]
+
+    def list_playbooks(self, *, include_retired: bool) -> list[Playbook]:
+        table = schema.playbooks
+
+        def read(connection: sa.Connection) -> list[Playbook]:
+            query = sa.select(table).order_by(table.c.created_at, table.c.id)
+            if not include_retired:
+                query = query.where(table.c.status != "retired")
+            return [
+                Playbook(
+                    id=row["id"],
+                    name=row["name"],
+                    title=row["title"],
+                    when_to_use=row["when_to_use"],
+                    steps=tuple(row["steps"]),
+                    category=row["category"],
+                    status=row["status"],
+                    source_lesson_ids=tuple(row["source_lesson_ids"]),
+                    created_at=row["created_at"],
+                    retired_reason=row["status_reason"] if row["status"] == "retired" else None,
+                )
+                for row in connection.execute(query).mappings()
+            ]
+
+        return self._read("playbooks", read)
+
+    def set_playbook_status(self, name: str, status: str, reason: str) -> bool:
+        table = schema.playbooks
+        changed: list[int] = []
+
+        def write(connection: sa.Connection) -> None:
+            result = connection.execute(
+                table.update()
+                .where(table.c.name == name, table.c.status != "retired")
+                .values(status=status, status_reason=reason[:500], updated_at=self._clock())
+            )
+            changed.append(result.rowcount)
+
+        self._write(f"playbook {name}", write)
+        return bool(changed and changed[0])
+
+    def record_guidebook(self, content: str, changes: Sequence[str]) -> int:
+        table = schema.guidebook_versions
+        versions: list[int] = []
+
+        def write(connection: sa.Connection) -> None:
+            latest = connection.execute(sa.select(sa.func.max(table.c.version))).scalar()
+            version = int(latest or 0) + 1
+            connection.execute(
+                table.insert().values(
+                    version=version,
+                    created_at=self._clock(),
+                    content=content,
+                    changes=list(changes),
+                )
+            )
+            versions.append(version)
+
+        self._write("guidebook", write)
+        return versions[0]
+
+    def _guidebook_row(self, version: int | None) -> dict[str, Any] | None:
+        table = schema.guidebook_versions
+
+        def read(connection: sa.Connection) -> dict[str, Any] | None:
+            query = sa.select(table)
+            query = (
+                query.order_by(table.c.version.desc()).limit(1)
+                if version is None
+                else query.where(table.c.version == version)
+            )
+            row = connection.execute(query).mappings().first()
+            return None if row is None else dict(row)
+
+        return self._read("guidebook", read)
+
+    def latest_guidebook(self) -> dict[str, Any] | None:
+        return self._guidebook_row(None)
+
+    def guidebook(self, version: int) -> dict[str, Any] | None:
+        return self._guidebook_row(version)
+
+    def analysis_contexts(self, start: datetime, end: datetime) -> list[dict[str, Any]]:
+        table = schema.analyses
+
+        def read(connection: sa.Connection) -> list[dict[str, Any]]:
+            query = (
+                sa.select(table.c.run_id, table.c.started_at, table.c.lesson_ids, table.c.proposal)
+                .where(table.c.started_at >= start, table.c.started_at < end)
+                .order_by(table.c.started_at, table.c.id)
+            )
+            return [
+                {
+                    "run_id": row["run_id"],
+                    "started_at": row["started_at"],
+                    "lesson_ids": list(row["lesson_ids"] or []),
+                    "playbook": (row["proposal"] or {}).get("playbook"),
+                }
+                for row in connection.execute(query).mappings()
+            ]
+
+        return self._read("analyses", read)
 
     def environments(self) -> set[str]:
         def read(connection: sa.Connection) -> set[str]:

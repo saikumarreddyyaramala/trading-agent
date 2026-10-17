@@ -3,7 +3,8 @@
     premarket watch -> preflight (data_collection) -> analysis (analysis, with the
     morning brief) -> entry (trade_window_start) -> manage every minute
     -> close (force_close) -> reconcile (report) -> post-market watch (post_market)
-    -> reflect (self-learning, ADR 0013) -> plan for the next session -> report
+    -> reflect (self-learning, ADR 0013) -> curate the guidebook (ADR 0017)
+    -> plan for the next session -> report
 
 The watch and the plan (ADR 0016) are bookkeeping: a failure is recorded, never blocking.
 
@@ -58,6 +59,7 @@ STEPS = (
     "reconcile",
     "postmarket",
     "reflect",
+    "curate",
     "plan",
     "report",
 )
@@ -99,6 +101,8 @@ class CycleServices:
     plan: Callable[[date], str] | None = None
     # The analyst's morning brief: yesterday's plan and the pre-market alerts.
     brief: Callable[[date], str | None] | None = None
+    # Promote, retire, and write playbooks; rebuild the guidebook (ADR 0017).
+    curate: Callable[[date], str] | None = None
 
 
 @dataclass(frozen=True)
@@ -298,6 +302,7 @@ class DailyCycle:
         self._record("run result", lambda s: s.finish_run(run_id, status, summary))
         self._side_step(run_id, "postmarket", self._services.postmarket, session, done)
         self._reflect(run_id, session, done)  # never affects the day's trades or result
+        self._side_step(run_id, "curate", self._services.curate, session, done)
         self._side_step(run_id, "plan", self._services.plan, session, done)
         self._report(run_id, session, done)  # after the result, so the report includes it
         self._log.info("cycle.day_finished", run_id=run_id, status=status, summary=summary)

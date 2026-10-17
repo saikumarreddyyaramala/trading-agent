@@ -72,6 +72,7 @@ def _run(
     log: _Log | None = None,
     tool_budget: int = 100,
     lessons: tuple[Lesson, ...] = (),
+    playbooks: tuple[Any, ...] = (),
     **analyst: Any,
 ) -> tuple[AnalystResult, FakeProvider]:
     market_data = healthy_market_data("AAPL", "MSFT")
@@ -98,6 +99,7 @@ def _run(
         clock=lambda: NOW,
         logger=log or _Log(),
         lessons=lessons,
+        playbooks=playbooks,
     )
     return anyio.run(agent.run), provider
 
@@ -304,3 +306,25 @@ def test_no_lessons_no_lessons_section() -> None:
     result, provider = _run([NO_TRADE])
     assert "Lessons from your own past results" not in provider.requests[0].system
     assert result.lesson_ids == ()
+
+
+# ---------- Playbooks (ADR 0017) ----------
+
+
+def test_a_named_playbook_is_kept_when_it_was_offered() -> None:
+    from tests.unit.test_guidebook_store import playbook
+
+    offered = (playbook("gap-check"),)
+    result, provider = _run([(QUOTE, BARS), _answer(playbook="gap-check")], playbooks=offered)
+    assert result.proposal is not None
+    assert result.proposal.playbook == "gap-check"
+    system = provider.requests[0].system
+    assert "### gap-check: Earnings gap check (candidate)" in system
+    assert '"playbook": "the name of the playbook you followed" or null' in system
+
+
+def test_an_unknown_playbook_name_is_dropped() -> None:
+    result, _ = _run([(QUOTE, BARS), _answer(playbook="made-up")])
+    assert result.status == "proposed"
+    assert result.proposal is not None
+    assert result.proposal.playbook is None

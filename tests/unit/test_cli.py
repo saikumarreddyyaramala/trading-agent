@@ -1497,3 +1497,54 @@ def test_watch_shows_data_problems_as_warnings(
     result = runner.invoke(cli.app, ["watch", "AAPL", "--config-dir", str(config_dir)])
     assert result.exit_code == 0
     assert "Warning: snapshots unavailable" in result.output
+
+
+# ---------- guidebook and playbooks (ADR 0017) ----------
+
+
+def test_guidebook_command(config_dir: Path, audit_db: sa.Engine, tmp_path: Path) -> None:
+    store = SqlAuditStore(audit_db, AppConfig())
+    none = runner.invoke(cli.app, ["guidebook", "--config-dir", str(config_dir)])
+    assert none.exit_code == 1
+    assert "No guidebook yet" in none.output
+
+    store.record_guidebook("# Guidebook\nfirst", ["first edition"])
+    store.record_guidebook("# Guidebook\nsecond", ["promoted lesson #1"])
+    latest = runner.invoke(cli.app, ["guidebook", "--config-dir", str(config_dir)])
+    assert latest.exit_code == 0
+    assert "second" in latest.output
+    assert "Version 2: promoted lesson #1" in latest.output
+    first = runner.invoke(
+        cli.app, ["guidebook", "--version", "1", "--save", "--config-dir", str(config_dir)]
+    )
+    assert "first" in first.output
+    assert (tmp_path / "reports" / "guidebook.md").read_text(encoding="utf-8").endswith("first")
+    missing = runner.invoke(
+        cli.app, ["guidebook", "--version", "9", "--config-dir", str(config_dir)]
+    )
+    assert missing.exit_code == 1
+
+
+def test_playbooks_commands(config_dir: Path, audit_db: sa.Engine) -> None:
+    from tests.unit.test_guidebook_store import playbook
+
+    store = SqlAuditStore(audit_db, AppConfig())
+    empty = runner.invoke(cli.app, ["playbooks", "--config-dir", str(config_dir)])
+    assert "No playbooks yet" in empty.output
+    store.record_playbook(playbook("gap-check"))
+    listed = runner.invoke(cli.app, ["playbooks", "--config-dir", str(config_dir)])
+    assert "gap-check  candidate  Earnings gap check" in listed.output
+    assert "1. Check the gap size with get_quote." in listed.output
+
+    retired = runner.invoke(
+        cli.app,
+        ["retire-playbook", "gap-check", "--reason", "too vague", "--config-dir", str(config_dir)],
+    )
+    assert retired.exit_code == 0
+    assert "Retired playbook gap-check." in retired.output
+    again = runner.invoke(
+        cli.app, ["retire-playbook", "gap-check", "--reason", "x", "--config-dir", str(config_dir)]
+    )
+    assert again.exit_code == 1
+    everything = runner.invoke(cli.app, ["playbooks", "--all", "--config-dir", str(config_dir)])
+    assert "retired: by operator: too vague" in everything.output

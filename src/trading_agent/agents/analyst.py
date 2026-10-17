@@ -35,6 +35,7 @@ from trading_agent.domain.models import (
     Lesson,
     LLMRequest,
     LLMUsage,
+    Playbook,
     ToolCall,
     ToolResult,
     ToolSpec,
@@ -106,8 +107,10 @@ class AnalystAgent:
         clock: Callable[[], datetime] | None = None,
         logger: Any = None,
         lessons: Sequence[Lesson] = (),
+        playbooks: Sequence[Playbook] = (),
     ) -> None:
         self._lessons = tuple(lessons)
+        self._playbooks = tuple(playbooks)
         self._gateway = gateway
         self._server = server
         self._config = config
@@ -157,7 +160,7 @@ class AnalystAgent:
                 ToolSpec(name=t.name, description=t.description or "", input_schema=t.input_schema)
                 for t in listed.tools
             )
-            system = system_prompt(self._config, self._lessons)
+            system = system_prompt(self._config, self._lessons, self._playbooks)
             messages = [
                 ChatMessage(
                     role="user",
@@ -203,6 +206,10 @@ class AnalystAgent:
                     proposal, problems = None, [str(exc)]
 
                 if proposal is not None and not problems:
+                    offered = {p.name for p in self._playbooks}
+                    if proposal.playbook and proposal.playbook not in offered:
+                        log.info("analyst.unknown_playbook", playbook=proposal.playbook)
+                        proposal = proposal.model_copy(update={"playbook": None})
                     if proposal.decision == "buy":
                         return finish("proposed", "evidence verified", proposal)
                     return finish("no_trade", "the analyst chose not to trade", proposal)

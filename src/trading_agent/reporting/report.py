@@ -124,6 +124,8 @@ class DailyReport(BaseModel):
     after_hours_alerts: list[str] = []
     plan_for: date | None = None  # the next-day plan made today
     plan: list[str] = []
+    guidebook_version: int | None = None  # a new edition made that day (ADR 0017)
+    guidebook_changes: list[str] = []
 
 
 class ReportBuilder:
@@ -245,6 +247,7 @@ class ReportBuilder:
             costs=costs.days[0] if costs else None,
             slots=slots,
             **self._watch_and_plan(day, warnings),
+            **self._guidebook(day, warnings),
             unpriced_models=costs.unpriced_models if costs else [],
         )
         self._log.info("report.built", day=str(day), run_id=run_id, warnings=len(warnings))
@@ -280,6 +283,16 @@ class ReportBuilder:
             output_tokens=row["output_tokens"],
             cost_usd=cost,
         )
+
+    def _guidebook(self, day: date, warnings: list[str]) -> dict[str, Any]:
+        try:
+            latest = self._store.latest_guidebook()
+        except AuditError as exc:
+            warnings.append(f"guidebook unavailable: {exc}")
+            return {}
+        if latest is None or latest["created_at"].astimezone(self._zone).date() != day:
+            return {}
+        return {"guidebook_version": latest["version"], "guidebook_changes": latest["changes"]}
 
     def _watch_and_plan(self, day: date, warnings: list[str]) -> dict[str, Any]:
         try:
@@ -506,6 +519,13 @@ def render_markdown(report: DailyReport) -> str:
         if report.after_hours_alerts:
             lines.append(f"After hours: {'; '.join(report.after_hours_alerts)}.")
         lines.append("")
+    if report.guidebook_version is not None:
+        lines += [
+            "## Guidebook",
+            f"Version {report.guidebook_version} today: "
+            f"{'; '.join(report.guidebook_changes)}. See `trading-agent guidebook`.",
+            "",
+        ]
     if report.plan_for is not None:
         lines.append(f"## Plan for {report.plan_for:%A %Y-%m-%d}")
         lines += [f"- {item}" for item in report.plan] or ["Nothing to follow up."]

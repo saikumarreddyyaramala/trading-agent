@@ -628,3 +628,71 @@ def test_plan_uses_the_brokers_calendar(
     plan = store.plan_from(date(2026, 10, 15))
     assert plan is not None
     assert plan["for_day"] > date(2026, 10, 15)
+
+
+# ---------- Guidebook (ADR 0017) ----------
+
+
+def test_curate_builds_and_saves_the_guidebook(
+    config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    secrets = make_secrets(database_url=_learning_db(tmp_path))
+    container = Container(config=load_config("paper", config_dir), secrets=secrets)
+    monkeypatch.setattr(Container, "build_playbook_writer", lambda self: None)
+    detail = container.curate(date(2026, 10, 15))
+    assert "guidebook v1" in detail
+    saved = tmp_path / "reports" / "guidebook.md"
+    assert saved.read_text(encoding="utf-8").startswith("# Guidebook")
+    assert "guidebook v" not in container.curate(date(2026, 10, 15))  # nothing changed
+
+
+def test_curate_needs_a_database_and_can_be_disabled(config_dir: Path, tmp_path: Path) -> None:
+    container = Container(config=load_config("paper", config_dir), secrets=make_secrets())
+    assert container.curate(date(2026, 10, 15)).startswith("skipped: no database")
+    (config_dir / "paper.yaml").write_text(
+        "environment: paper\nbroker:\n  paper: true\nguidebook:\n  enabled: false\n",
+        encoding="utf-8",
+    )
+    secrets = make_secrets(database_url=_learning_db(tmp_path))
+    off = Container(config=load_config("paper", config_dir), secrets=secrets)
+    assert off.curate(date(2026, 10, 15)) == "disabled (guidebook.enabled: false)"
+    assert off.build_cycle_services().curate is None
+
+
+def test_the_analyst_is_offered_playbooks(config_dir: Path, tmp_path: Path) -> None:
+    from tests.unit.test_guidebook_store import playbook
+
+    secrets = make_secrets(database_url=_learning_db(tmp_path))
+    container = Container(config=load_config("paper", config_dir), secrets=secrets)
+    store = container.build_audit_store()
+    store.record_playbook(playbook("trial", status="candidate"))
+    store.record_playbook(playbook("proven", status="active"))
+    assert [p.name for p in container.offered_playbooks()] == ["trial", "proven"]
+    assert [p.name for p in container.build_analyst()._playbooks] == ["trial", "proven"]
+
+
+def test_live_is_offered_only_active_playbooks(
+    config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from tests.unit.test_guidebook_store import playbook
+
+    secrets = make_secrets(database_url=_learning_db(tmp_path), live_trading_confirmed=True)
+    container = Container(config=load_config("live", config_dir), secrets=secrets)
+    store = container.build_audit_store()
+    store.record_playbook(playbook("trial", status="candidate"))
+    store.record_playbook(playbook("proven", status="active"))
+    assert [p.name for p in container.offered_playbooks()] == ["proven"]
+
+
+def test_no_playbooks_without_a_database(config_dir: Path, tmp_path: Path) -> None:
+    container = Container(config=load_config("paper", config_dir), secrets=make_secrets())
+    assert container.offered_playbooks() == []
+    unmigrated = make_secrets(database_url=SecretStr(f"sqlite:///{tmp_path / 'empty.db'}"))
+    assert Container(container.config, unmigrated).offered_playbooks() == []
+
+
+def test_builds_the_playbook_writer(config_dir: Path) -> None:
+    from trading_agent.agents.playbooks import PlaybookWriter
+
+    container = Container(config=load_config("paper", config_dir), secrets=make_secrets())
+    assert isinstance(container.build_playbook_writer(), PlaybookWriter)

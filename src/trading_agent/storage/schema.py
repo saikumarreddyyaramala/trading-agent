@@ -223,6 +223,8 @@ lessons = sa.Table(
     sa.Column("status", sa.String(16), nullable=False),  # active | retired
     sa.Column("retired_at", Timestamp),
     sa.Column("retired_reason", sa.Text),
+    # Set when the lesson became a guidebook principle (migration 0008, ADR 0017).
+    sa.Column("promoted_at", Timestamp),
 )
 
 # Every model call and what it cost (migration 0005, ADR 0014).
@@ -266,4 +268,31 @@ day_plans = sa.Table(
     sa.Column("created_at", Timestamp, nullable=False),
     sa.Column("items", JSONType, nullable=False),
     sa.Column("summary", sa.Text, nullable=False),
+)
+
+# Research procedures the system wrote from its lessons (migration 0008, ADR 0017).
+playbooks = sa.Table(
+    "playbooks",
+    metadata,
+    sa.Column("id", sa.Integer, primary_key=True, autoincrement=True),
+    sa.Column("name", sa.String(40), nullable=False, unique=True),
+    sa.Column("title", sa.String(80), nullable=False),
+    sa.Column("when_to_use", sa.Text, nullable=False),
+    sa.Column("steps", JSONType, nullable=False),
+    sa.Column("category", sa.String(16), nullable=False),
+    sa.Column("status", sa.String(16), nullable=False),  # candidate | active | retired
+    sa.Column("source_lesson_ids", JSONType, nullable=False),
+    sa.Column("created_at", Timestamp, nullable=False),
+    sa.Column("updated_at", Timestamp, nullable=False),
+    sa.Column("status_reason", sa.Text),
+)
+
+# Every edition of the guidebook (migration 0008, ADR 0017).
+guidebook_versions = sa.Table(
+    "guidebook_versions",
+    metadata,
+    sa.Column("version", sa.Integer, primary_key=True, autoincrement=False),
+    sa.Column("created_at", Timestamp, nullable=False),
+    sa.Column("content", sa.Text, nullable=False),
+    sa.Column("changes", JSONType, nullable=False),
 )

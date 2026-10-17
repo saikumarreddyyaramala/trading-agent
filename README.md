@@ -27,7 +27,7 @@ risk engine, executes on a broker, and reports the result against the S&P 500.
 | 13 | Cost ledger: every model call priced, daily LLM budget, failing-tests-first | Done |
 | 14 | Parametric trade score; up to 3 paper trades a day in separate slots | Done |
 | 15 | Pre-market and after-hours watch; next-day plan; morning brief | Done |
-| 16 | Guidebook, outcome-scored lessons, and playbooks | Planned |
+| 16 | Guidebook (constitution), outcome-scored lessons, playbooks | Done |
 | 17 | Dashboard backend: live stream, news cards, costs | Planned |
 | 18 | Dashboard UI (local web app) | Planned |
 
@@ -58,7 +58,8 @@ Key rules (see [ADR 0001](docs/adr/0001-architecture.md), [ADR 0002](docs/adr/00
 [ADR 0009](docs/adr/0009-daily-report.md), [ADR 0010](docs/adr/0010-critic-agent.md),
 [ADR 0011](docs/adr/0011-evaluation.md), [ADR 0012](docs/adr/0012-going-live.md),
 [ADR 0013](docs/adr/0013-self-learning.md), [ADR 0014](docs/adr/0014-cost-ledger.md),
-[ADR 0015](docs/adr/0015-trade-score-and-slots.md), and [ADR 0016](docs/adr/0016-market-watch-and-plan.md)):
+[ADR 0015](docs/adr/0015-trade-score-and-slots.md), [ADR 0016](docs/adr/0016-market-watch-and-plan.md), and
+[ADR 0017](docs/adr/0017-guidebook-and-playbooks.md)):
 - The AI has read-only tools; it can never place an order directly. Tool inputs are
   validated and bounded, and each session has a call budget.
 - Every model call goes through the LLM gateway (pinned model, fallback, token caps, logs).
@@ -83,6 +84,8 @@ Key rules (see [ADR 0001](docs/adr/0001-architecture.md), [ADR 0002](docs/adr/00
 - Market data must pass quality and freshness rules; a symbol with bad data is rejected.
 - The system learns from its own results as advisory lessons only. Lessons can never
   change a rule, limit, or check, and code rejects any lesson that tries to.
+- Its guidebook promotes or retires lessons and playbooks only on measured results; the
+  core rules in it are generated from code and cannot be edited by the system.
 
 ## Quick start
 
@@ -140,6 +143,8 @@ Ready
 | `uv run trading-agent watch AAPL --phase pre` | Scan pre-market (or `post`) moves, news, and catalysts now |
 | `uv run trading-agent plan` | The to-do list the last session left for today (`--date`) |
 | `uv run trading-agent costs` | What running the system cost, per day, agent, and model (`--days`, `--json`) |
+| `uv run trading-agent guidebook` | The system's guidebook: core rules, principles, playbooks, record (`--version`, `--save`) |
+| `uv run trading-agent playbooks` | Research procedures it wrote from its lessons (`--all`); `retire-playbook NAME --reason` |
 | `uv run trading-agent lessons` | What the agent has learned (`--all` includes retired ones) |
 | `uv run trading-agent retire-lesson ID --reason TEXT` | Stop the analyst from seeing a lesson |
 | `uv run trading-agent learn --date 2026-10-15` | Review a finished day now (uses tokens) |
@@ -198,7 +203,8 @@ docs/adr/                architecture decision records
 | reconcile | 16:15 | sync final order statuses and fills |
 | postmarket | 16:45 | scan after-hours moves and news for today's trades and ideas |
 | reflect | after postmarket | review the day and update the analyst's lessons (never affects trades) |
-| plan | after reflect | the to-do list for the next session, from the day's facts |
+| curate | after reflect | judge lessons and playbooks by results; rebuild the guidebook |
+| plan | after curate | the to-do list for the next session, from the day's facts |
 | report | after plan | daily report saved to `reports/`, and sent to `REPORT_WEBHOOK_URL` if set |
 
 Each step is recorded once, so a restarted process resumes where it left off.
@@ -229,6 +235,22 @@ The guardrails (ADR 0013):
 Every analysis records which lessons it used, and the daily report shows what was
 learned and retired. Review them with `trading-agent lessons`. Turn learning off with
 `learning.enabled: false`.
+
+## The guidebook
+
+The system keeps its own guidebook (ADR 0017), rebuilt every evening and versioned:
+
+1. **Core rules**: generated from the config and fixed in code. The system cannot change them.
+2. **Principles**: lessons whose trades did measurably better than trades without them
+   (needs 10+ closed trades on each side). Lessons that went with worse trades are retired.
+3. **Playbooks**: when several lessons build up in one area, a guarded writer turns them
+   into a step-by-step research procedure. It is tried on paper as a candidate, becomes
+   active when its own trades do well, and is retired when they do not. Playbooks are text
+   for the analyst, never code.
+4. **Self-assessment**: the record so far, and how much of what it knows is proven.
+
+Each morning the analyst reads the principles, the recent lessons, and the playbooks.
+It names the playbook it followed, so every playbook is judged on its own trades.
 
 ## Market watch and the next-day plan
 

@@ -63,3 +63,34 @@ def test_task_prompt_carries_slot_context() -> None:
     prompt = task_prompt(NOW, "America/New_York", "This is trade slot 2 of 3 today.")
     assert prompt.endswith("no trade.\n\nThis is trade slot 2 of 3 today.")
     assert task_prompt(NOW, "America/New_York").endswith("or no trade.")
+
+
+def test_principles_lessons_and_playbooks_are_separate(config_dir: Path) -> None:
+    from tests.unit.test_guidebook_store import playbook
+
+    config = load_config("paper", config_dir)
+
+    def lesson(i: int, text: str, promoted: bool) -> Lesson:
+        return Lesson(
+            id=i,
+            text=text,
+            category="entry",
+            source_run_id=None,
+            created_at=NOW,
+            expires_at=NOW,
+            promoted=promoted,
+        )
+
+    prompt = system_prompt(
+        config,
+        [lesson(1, "Proven rule of thumb.", True), lesson(2, "Fresh hunch.", False)],
+        [playbook("gap-check"), playbook("old-one", status="active")],
+    )
+    principles = prompt.index("Principles proven by your own results")
+    lessons = prompt.index("Lessons from your own past results")
+    playbooks = prompt.index("Playbooks:")
+    assert principles < lessons < playbooks
+    assert "- [entry] Proven rule of thumb." in prompt[principles:lessons]
+    assert "- [entry, 2026-10-15] Fresh hunch." in prompt[lessons:playbooks]
+    assert "1. Check the gap size with get_quote." in prompt[playbooks:]
+    assert "### old-one: Earnings gap check (active)" in prompt[playbooks:]

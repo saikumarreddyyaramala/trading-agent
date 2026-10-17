@@ -869,6 +869,68 @@ def costs(
 
 
 @app.command()
+def guidebook(
+    version: Annotated[
+        int | None, typer.Option("--version", min=1, help="An earlier edition (default: latest).")
+    ] = None,
+    save: Annotated[bool, typer.Option("--save", help="Also write reports/guidebook.md.")] = False,
+    env: EnvOption = None,
+    config_dir: ConfigDirOption = None,
+) -> None:
+    """The system's guidebook: core rules, proven principles, playbooks, and its record."""
+    container = _container(env, config_dir)
+    store = _store_or_exit(container)
+    found = store.latest_guidebook() if version is None else store.guidebook(version)
+    if found is None:
+        typer.echo("No guidebook yet." if version is None else f"No guidebook version {version}.")
+        raise typer.Exit(code=1)
+    typer.echo(found["content"])
+    typer.secho(
+        f"Version {found['version']}: {'; '.join(found['changes'])}", fg=typer.colors.BLUE, err=True
+    )
+    if save:
+        folder = Path(container.config.reporting.output_dir)
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / "guidebook.md").write_text(found["content"], encoding="utf-8")
+
+
+@app.command()
+def playbooks(
+    show_all: Annotated[bool, typer.Option("--all", help="Include retired playbooks.")] = False,
+    env: EnvOption = None,
+    config_dir: ConfigDirOption = None,
+) -> None:
+    """Research procedures the system wrote from its lessons (ADR 0017)."""
+    store = _store_or_exit(_container(env, config_dir))
+    found = store.list_playbooks(include_retired=show_all)
+    if not found:
+        typer.echo("No playbooks yet. The curator writes them once lessons build up.")
+        return
+    for playbook in found:
+        typer.echo(f"{playbook.name}  {playbook.status}  {playbook.title}")
+        typer.echo(f"  When to use: {playbook.when_to_use}")
+        for i, step in enumerate(playbook.steps, start=1):
+            typer.echo(f"  {i}. {step}")
+        if playbook.retired_reason:
+            typer.echo(f"  retired: {playbook.retired_reason}")
+
+
+@app.command("retire-playbook")
+def retire_playbook(
+    name: Annotated[str, typer.Argument(help="Playbook name from `trading-agent playbooks`.")],
+    reason: Annotated[str, typer.Option("--reason", help="Why it should stop being offered.")],
+    env: EnvOption = None,
+    config_dir: ConfigDirOption = None,
+) -> None:
+    """Stop offering a playbook to the analyst. The record is kept."""
+    store = _store_or_exit(_container(env, config_dir))
+    if not store.set_playbook_status(name, "retired", f"by operator: {reason}"):
+        typer.secho(f"No live playbook named {name}.", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+    typer.echo(f"Retired playbook {name}.")
+
+
+@app.command()
 def lessons(
     show_all: Annotated[
         bool, typer.Option("--all", help="Include retired and expired lessons.")

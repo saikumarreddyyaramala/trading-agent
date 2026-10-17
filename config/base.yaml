@@ -164,3 +164,18 @@ watch:
   max_symbols: 25
   news_lookback_hours: 16
   max_plan_items: 12
+
+# The guidebook (ADR 0017): lessons that went with measurably better trades become
+# principles; ones that went with worse trades are retired; clusters of lessons become
+# playbooks (research procedures, never code), tried on paper before they count. See it
+# with `trading-agent guidebook` and `trading-agent playbooks`.
+guidebook:
+  enabled: true
+  min_trades: 10                # closed trades needed with the lesson and without it
+  promote_lift_pct: 0.5         # promote when trades with it did this much better
+  retire_lift_pct: 0.5          # retire when they did this much worse
+  playbook_min_trades: 5
+  playbook_retire_below_pct: -1.0
+  min_lessons_for_playbook: 3
+  max_playbooks: 8
+  write_playbooks: true
