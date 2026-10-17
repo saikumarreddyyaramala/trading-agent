@@ -130,6 +130,19 @@ def test_ledger_extracts_prices_from_each_price_tool() -> None:
     assert ledger.symbols_by_call["c3"] == {"MSFT", "TSLA"}
 
 
+def test_ledger_takes_the_current_price_from_technical_analysis() -> None:
+    ledger = ResearchLedger()
+    ledger.record(
+        "t1",
+        "technical_analysis",
+        {"symbol": "nvda"},
+        {"symbol": "NVDA", "price": "180.5", "levels": {"supports": [170.0]}},
+    )
+    # Only the live price counts as an observed price: indicator levels are not quotes.
+    assert ledger.prices == {"NVDA": [Decimal("180.5")]}
+    assert ledger.symbols_by_call == {"t1": {"NVDA"}}
+
+
 def test_ledger_tracks_symbols_without_prices() -> None:
     ledger = ResearchLedger()
     ledger.record("n1", "get_news", {"symbol": "nvda", "hours": 24}, {"symbol": "NVDA"})

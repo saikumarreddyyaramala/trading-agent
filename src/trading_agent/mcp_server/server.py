@@ -39,6 +39,7 @@ ALLOWED_TOOLS = frozenset(
         "get_asset",
         "get_most_active",
         "research_snapshot",
+        "technical_analysis",
     }
 )
 
@@ -124,6 +125,17 @@ def build_server(tools: ResearchTools) -> MCPServer:
         trade (allowed exchange, minimum price, no funds or ETFs). A starting list of liquid
         candidates; it says nothing about whether a stock is a good trade."""
         return _call(lambda: tools.get_most_active(limit))
+
+    @server.tool(annotations=READ_ONLY)
+    def technical_analysis(symbol: Symbol) -> dict[str, Any]:
+        """Full technical picture for one stock from a year of daily bars and today's
+        5-minute bars: trend (20/50/200-day averages, MACD, ADX, golden/death crosses),
+        momentum (RSI, stochastic, MFI), volatility (ATR, Bollinger squeeze), volume (relative
+        volume, OBV, money flow), support/resistance and pivots, candlestick patterns,
+        intraday VWAP and opening range, and 20-day strength against SPY and QQQ. Each signal
+        comes with a plain-English reading (bullish, bearish, or neutral) and an overall bias.
+        Indicators describe the past; weigh them, do not obey them."""
+        return _call(lambda: tools.technical_analysis(symbol))
 
     @server.tool(annotations=READ_ONLY)
     def research_snapshot(

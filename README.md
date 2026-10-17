@@ -13,7 +13,7 @@ risk engine, executes on a broker, and reports the result against the S&P 500.
 | --- | --- | --- |
 | 0 | Foundations: config, secrets, logging, LLM gateway, broker connection, health check, CI | Done |
 | 1 | Market data and news: quotes, daily bars, assets, news, freshness rules | Done |
-| 2 | MCP server: 7 read-only research tools, input bounds, call budget, audit log | Done |
+| 2 | MCP server: read-only research tools, input bounds, call budget, audit log | Done |
 | 3 | Analyst agent: tool-calling research over MCP, evidence-verified proposals | Done |
 | 4 | Risk engine: 15 code-enforced checks, cash-only sizing, eligible-only candidates | Done |
 | 5 | Order execution (paper): idempotent entries, broker-side stops, managed exits | Done |
@@ -30,6 +30,7 @@ risk engine, executes on a broker, and reports the result against the S&P 500.
 | 16 | Guidebook (constitution), outcome-scored lessons, playbooks | Done |
 | 17 | Dashboard backend: local read-only API, live stream, news cards, costs | Done |
 | 18 | Dashboard UI: live, Robinhood-inspired local web app | Done |
+| 19 | Technical analysis: 25+ indicators, readings, intraday, a score part | Done |
 
 ## Architecture
 
@@ -143,6 +144,7 @@ Ready
 | `uv run trading-agent evaluate-critic` | Replay the current critic over recorded proposals (uses tokens) |
 | `uv run trading-agent watch AAPL --phase pre` | Scan pre-market (or `post`) moves, news, and catalysts now |
 | `uv run trading-agent plan` | The to-do list the last session left for today (`--date`) |
+| `uv run trading-agent technicals AAPL` | Every technical indicator with readings (`--json`; free, no LLM) |
 | `uv run trading-agent costs` | What running the system cost, per day, agent, and model (`--days`, `--json`) |
 | `uv run trading-agent dashboard` | The live dashboard on http://127.0.0.1:8765 (read-only) |
 | `uv run trading-agent guidebook` | The system's guidebook: core rules, principles, playbooks, record (`--version`, `--save`) |
@@ -170,6 +172,7 @@ src/trading_agent/
   execution/             read-only broker adapter, order adapter, executor (paper)
   data/                  market data + news adapters, quality/freshness rules, collector
   mcp_server/            read-only research tools + MCP server (stdio)
+  analysis/              technical indicators and the per-stock technical report
   agents/                analyst (tool-calling research, evidence checks) and critic (veto-only review)
   risk/                  eligibility rules, risk engine, position sizing
   storage/               audit trail: schema, Alembic migrations, store
@@ -293,7 +296,8 @@ headline text (ADR 0016).
 
 Every buy gets a deterministic score from 0 to 100 inside the risk engine (ADR 0015):
 reward/risk after the spread, how far the stop is in average daily ranges (ATR), trend,
-how stretched the price is above its 20-day average, the analyst's confidence, and,
+how stretched the price is above its 20-day average, the analyst's confidence,
+technicals (RSI zone, MACD, ADX direction, Bollinger position, on-balance volume), and,
 after 10 closed trades, the system's own results. It needs 60 to trade, and some things
 reject a trade at any score: a stop inside normal daily noise, too little reward after
 costs, an overextended price. See the breakdown with `trading-agent risk-check AAPL
@@ -378,7 +382,25 @@ claude mcp add trading-research -- uv run --directory "$(pwd)" trading-agent mcp
 ```
 
 Tools: `market_status`, `get_quote`, `get_daily_bars`, `get_news`, `get_asset`,
-`get_most_active`, `research_snapshot`. All are read-only; none can trade.
+`get_most_active`, `research_snapshot`, `technical_analysis`. All are read-only; none can
+trade.
+
+## Technical analysis
+
+`technical_analysis` (and `trading-agent technicals AAPL`) computes every standard indicator
+in code (ADR 0020):
+- trend: 20/50/200-day averages, golden and death crosses, MACD, and ADX;
+- momentum: RSI, stochastic, Williams %R, CCI, ROC, and MFI;
+- volatility: ATR, Bollinger (with squeeze), Keltner, and Donchian;
+- volume: relative volume, OBV, and Chaikin money flow;
+- levels: pivots, swing supports and resistances, and the 52-week range;
+- candlesticks and RSI divergence;
+- today's VWAP and the 30-minute opening range;
+- 20-day strength against SPY and QQQ.
+
+Each signal gets a plain reading (bullish, bearish, or neutral) and the report gives an
+overall bias, so the AI cites conclusions instead of doing arithmetic. Indicators describe
+the past; they are evidence, not predictions.
 
 ## Configuration
 

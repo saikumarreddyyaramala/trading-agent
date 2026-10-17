@@ -198,6 +198,7 @@ class ScoreWeights(_Strict):
     extension: Decimal = Field(default=Decimal(15), ge=0)
     confidence: Decimal = Field(default=Decimal(10), ge=0)
     history: Decimal = Field(default=Decimal(10), ge=0)
+    technicals: Decimal = Field(default=Decimal(20), ge=0)
 
     @model_validator(mode="after")
     def _not_all_zero(self) -> ScoreWeights:

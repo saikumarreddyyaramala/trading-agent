@@ -1,6 +1,6 @@
 """The trade score: a deterministic, parametric evaluation of a buy before it is placed.
 
-Six parts, each scored from 0 (worst) to 1 (best) and combined with configured weights:
+Seven parts, each scored from 0 (worst) to 1 (best) and combined with configured weights:
 
     Reward/risk         target vs stop after paying the spread both ways
     Stop vs volatility  how many average daily ranges (ATR) the stop sits below the entry
@@ -8,6 +8,7 @@ Six parts, each scored from 0 (worst) to 1 (best) and combined with configured w
     Extension           how far price has run above its 20-day average, in ATRs
     Confidence          the analyst's own confidence (a small weight: it is self-reported)
     History             the mean return of the system's own closed trades, once enough
+    Technicals          RSI zone, MACD, ADX direction, Bollinger position, on-balance volume
 
 Some conditions reject a trade whatever the total (hard fails): too little reward for the
 risk after costs, a stop inside normal daily noise, a badly overextended price, and too
@@ -23,6 +24,7 @@ from collections.abc import Sequence
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Literal
 
+from trading_agent.analysis import indicators as ta
 from trading_agent.domain.models import Bar, ScoreComponent, TradeScore
 from trading_agent.settings.models import RiskConfig, ScoringConfig
 
@@ -30,6 +32,7 @@ ATR_PERIOD = 14
 SMA_PERIOD = 20
 MOMENTUM_DAYS = 5
 MIN_BARS = SMA_PERIOD + 1
+TECHNICAL_BARS = 60  # enough for every technical check (MACD needs 35)
 _CONFIDENCE = {"low": Decimal("0.2"), "medium": Decimal("0.6"), "high": Decimal(1)}
 _HUNDREDTH = Decimal("0.01")
 _ZERO, _ONE, _HALF = Decimal(0), Decimal(1), Decimal("0.5")
@@ -63,6 +66,73 @@ def sma(bars: Sequence[Bar], period: int = SMA_PERIOD) -> Decimal | None:
     if len(bars) < period:
         return None
     return sum((b.close for b in bars[-period:]), _ZERO) / period
+
+
+def technical_check(bars: Sequence[Bar], price: Decimal) -> tuple[Decimal, str]:
+    """Five standard checks, each 0, 0.5, or 1, averaged over those the history allows
+    (ADR 0020). Returns the value and a short reason, neutral when none can be measured."""
+    highs = [float(b.high) for b in bars]
+    lows = [float(b.low) for b in bars]
+    closes = [float(b.close) for b in bars]
+    now = float(price)
+    marks: list[float] = []
+    notes: list[str] = []
+
+    rsi = ta.rsi(closes)[-1] if closes else None
+    if rsi is not None:
+        if 50 <= rsi < 70:
+            marks.append(1)
+            notes.append(f"RSI {rsi:.0f} healthy")
+        elif 70 <= rsi < 80 or 40 <= rsi < 50:
+            marks.append(0.5)
+            notes.append(f"RSI {rsi:.0f} {'stretched' if rsi >= 70 else 'soft'}")
+        else:
+            marks.append(0)
+            notes.append(f"RSI {rsi:.0f} {'overbought' if rsi >= 80 else 'weak'}")
+    macd = ta.macd(closes)
+    line, hist = (macd.line[-1], macd.histogram[-1]) if closes else (None, None)
+    if line is not None and hist is not None:
+        up = (line > 0) + (hist >= 0 or abs(hist) <= abs(line) * 0.05)
+        marks.append(up / 2)
+        notes.append(f"MACD {('down', 'mixed', 'up')[up]}")
+    adx = ta.adx(highs, lows, closes)
+    strength, plus, minus = (
+        (adx.adx[-1], adx.plus_di[-1], adx.minus_di[-1]) if closes else (None, None, None)
+    )
+    if strength is not None and plus is not None and minus is not None:
+        if plus > minus:
+            marks.append(1 if strength >= 20 else 0.5)
+            notes.append(f"buyers lead (ADX {strength:.0f})")
+        else:
+            marks.append(0)
+            notes.append(f"sellers lead (ADX {strength:.0f})")
+    bands = ta.bollinger(closes)
+    upper, lower = (bands.upper[-1], bands.lower[-1]) if closes else (None, None)
+    if upper is not None and lower is not None:
+        percent_b = (now - lower) / (upper - lower) if upper > lower else 0.5
+        if 0.5 <= percent_b <= 1:
+            marks.append(1)
+            notes.append("upper half of the bands")
+        elif percent_b > 1:
+            marks.append(0.5)
+            notes.append("above the upper band")
+        elif percent_b >= 0:
+            marks.append(0.5)
+            notes.append("lower half of the bands")
+        else:
+            marks.append(0)
+            notes.append("below the lower band")
+    if len(bars) > 20:
+        on_balance = ta.obv(closes, [float(b.volume) for b in bars])
+        change = on_balance[-1] - on_balance[-21]
+        marks.append(1 if change > 0 else 0.5 if change == 0 else 0)
+        notes.append(f"OBV {'rising' if change > 0 else 'flat' if change == 0 else 'falling'}")
+
+    if not marks:
+        return _HALF, "not enough price history: neutral"
+    passed = sum(1 for m in marks if m == 1)
+    value = Decimal(str(sum(marks) / len(marks)))
+    return value, f"{', '.join(notes)}: {passed} of {len(marks)}"
 
 
 def score_trade(
@@ -195,6 +265,10 @@ def score_trade(
             weights.history,
             f"last {len(recent)} closed trades: mean {expected}%, {wins} won",
         )
+
+    # ---- Technicals ----
+    value, detail = technical_check(bars, price)
+    add("Technicals", value, weights.technicals, detail)
 
     total_weight = sum((c.weight for c in components), _ZERO)
     total = _q(

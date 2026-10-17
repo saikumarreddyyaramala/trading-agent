@@ -15,6 +15,7 @@ from tests.conftest import (
     make_asset,
     make_bars,
     make_quote,
+    make_trend_bars,
 )
 from trading_agent.data.collector import MarketDataCollector
 from trading_agent.domain.models import ActiveStock
@@ -318,3 +319,72 @@ def test_unexpected_errors_propagate_and_are_logged() -> None:
     with pytest.raises(RuntimeError, match="bug"):
         tools.market_status()
     assert log.events[0][1]["outcome"] == "crash"
+
+
+# ---------- Technical analysis (ADR 0020) ----------
+
+
+def _technical_data(*, fail_intraday: bool = False) -> FakeMarketData:
+    data = healthy_market_data("AAPL")
+    data.bars = {
+        "AAPL": make_trend_bars("AAPL", 260),
+        "SPY": make_bars("SPY", ["400"] * 260),
+        "QQQ": make_bars("QQQ", ["300"] * 260),
+    }
+    open_bell = NOW.replace(hour=13, minute=30)  # 9:30 New York
+    data.intraday = {
+        "AAPL": tuple(
+            make_bars("AAPL", ["99.8", "99.9", "100.0", "100.1", "100.2", "100.3", "100.4"])
+        )
+    }
+    data.intraday["AAPL"] = tuple(
+        bar.model_copy(update={"timestamp": open_bell + timedelta(minutes=5 * i)})
+        for i, bar in enumerate(data.intraday["AAPL"])
+    )
+    if fail_intraday:
+        data.fail = True
+    return data
+
+
+def test_technical_analysis_returns_indicators_with_readings() -> None:
+    data = _technical_data()
+    tools = _tools(data)
+    result = tools.technical_analysis("aapl")
+    assert result["symbol"] == "AAPL"
+    assert isinstance(result["price"], str)
+    assert result["trend"]["sma_200"] is not None
+    assert result["momentum"]["rsi_14"] is not None
+    assert result["intraday"]["vwap"] is not None
+    assert "vs_SPY_20d" in result["relative_strength"]
+    assert "vs_QQQ_20d" in result["relative_strength"]
+    assert result["bias"] in {"bullish", "bearish", "mixed"}
+    assert all({"name", "signal", "note"} <= set(r) for r in result["signals"])
+    assert "past" in result["notice"]
+    # One budgeted call; daily bars for the stock and both benchmarks in one request.
+    assert tools.calls_used == 1
+    assert ("bars", ("AAPL", "SPY", "QQQ")) in data.calls
+    assert ("intraday", ("AAPL",)) in data.calls
+
+
+def test_technical_analysis_survives_missing_intraday_data() -> None:
+    result = _tools(_technical_data(fail_intraday=True)).technical_analysis("AAPL")
+    assert result["intraday"] is None
+    assert any("intraday" in w for w in result["warnings"])
+
+
+def test_technical_analysis_of_a_benchmark_does_not_compare_it_to_itself() -> None:
+    result = _tools(_technical_data()).technical_analysis("SPY")
+    assert "vs_SPY_20d" not in result["relative_strength"]
+    assert "vs_QQQ_20d" in result["relative_strength"]
+
+
+def test_technical_analysis_without_history_is_an_error() -> None:
+    with pytest.raises(ResearchToolError, match="no daily bars available for TSLA"):
+        _tools(_technical_data()).technical_analysis("TSLA")
+
+
+def test_technical_analysis_rejects_bad_symbols() -> None:
+    data = _technical_data()
+    with pytest.raises(ResearchToolError):
+        _tools(data).technical_analysis("NOT VALID")
+    assert data.calls == []

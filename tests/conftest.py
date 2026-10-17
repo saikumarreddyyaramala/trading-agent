@@ -285,11 +285,13 @@ class FakeMarketData:
         active: Sequence[ActiveStock] = (),
         fail: bool = False,
         snapshots: dict[str, Any] | None = None,
+        intraday: dict[str, tuple[Bar, ...]] | None = None,
         movers: Sequence[Any] = (),
         fail_snapshots: bool = False,
         fail_movers: bool = False,
     ) -> None:
         self.snapshots = snapshots or {}
+        self.intraday = intraday or {}
         self.movers = tuple(movers)
         self.fail_snapshots = fail_snapshots
         self.fail_movers = fail_movers
@@ -315,6 +317,18 @@ class FakeMarketData:
     def get_daily_bars(self, symbols: Sequence[str], *, days: int) -> dict[str, tuple[Bar, ...]]:
         self.calls.append(("bars", tuple(symbols)))
         return {s: self.bars[s][-days:] for s in symbols if s in self.bars}
+
+    def get_intraday_bars(
+        self, symbols: Sequence[str], *, minutes: int, start: datetime
+    ) -> dict[str, tuple[Bar, ...]]:
+        self.calls.append(("intraday", tuple(symbols)))
+        if self.fail:
+            raise MarketDataError("could not fetch intraday bars: down")
+        return {
+            s: tuple(b for b in self.intraday[s] if b.timestamp >= start)
+            for s in symbols
+            if s in self.intraday
+        }
 
     def get_snapshots(self, symbols: Sequence[str]) -> dict[str, Any]:
         self.calls.append(("snapshots", tuple(symbols)))

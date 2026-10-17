@@ -1385,7 +1385,8 @@ def test_risk_check_shows_the_score_breakdown(
         cli.app, ["risk-check", "AAPL", "--price", "100.05", "--config-dir", str(config_dir)]
     )
     # A manual check marks the analyst's confidence as low.
-    assert "Trade score 84.6/100 (needs 60)" in result.output
+    assert "Trade score 83.0/100 (needs 60)" in result.output
+    assert "  Technicals           0.75  x20  RSI 100 overbought" in result.output
     assert (
         "  Reward/risk          0.88  x20  1.88 after spread (10% target, 5% stop, 0.100% spread)"
         in result.output
@@ -1613,3 +1614,41 @@ def test_dashboard_explains_a_busy_port(config_dir: Path, monkeypatch: pytest.Mo
 
 def test_an_unknown_host_is_left_for_the_server_to_report() -> None:
     assert cli._port_busy("no-such-host.invalid", 8765) is False
+
+
+def test_technicals_command(config_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from tests.unit.test_research_tools import _technical_data, _tools
+
+    tools = _tools(_technical_data())
+    monkeypatch.setattr(Container, "build_research_tools", lambda self: tools)
+    result = runner.invoke(cli.app, ["technicals", "aapl", "--config-dir", str(config_dir)])
+    assert result.exit_code == 0, result.output
+    assert "AAPL technicals" in result.output
+    assert "Bias:" in result.output
+    assert "RSI" in result.output
+    assert "200-day average" in result.output
+    assert "Support" in result.output or "supports" in result.output
+    assert "describe the past" in result.output
+
+    as_json = runner.invoke(
+        cli.app, ["technicals", "AAPL", "--json", "--config-dir", str(config_dir)]
+    )
+    assert as_json.exit_code == 0, as_json.output
+    assert json.loads(as_json.output)["symbol"] == "AAPL"
+
+
+def test_technicals_command_reports_bad_input(
+    config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from tests.unit.test_research_tools import _technical_data, _tools
+
+    monkeypatch.setattr(Container, "build_research_tools", lambda self: _tools(_technical_data()))
+    result = runner.invoke(cli.app, ["technicals", "TSLA", "--config-dir", str(config_dir)])
+    assert result.exit_code == 1
+    assert "no daily bars available for TSLA" in result.output
+
+
+def test_technicals_command_needs_market_data_keys(config_dir: Path) -> None:
+    result = runner.invoke(cli.app, ["technicals", "AAPL", "--config-dir", str(config_dir)])
+    assert result.exit_code == 2
+    assert "Configuration error" in result.output

@@ -137,7 +137,7 @@ def test_clean_proposal_is_approved_and_sized() -> None:
         "symbol": "AAPL",
         "failed": [],
         "notional_usd": "49.03",
-        "score": "88.6",
+        "score": "86.3",
     }
 
 

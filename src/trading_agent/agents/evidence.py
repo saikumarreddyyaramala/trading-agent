@@ -108,6 +108,9 @@ class ResearchLedger:
             summary = result.get("summary")
             if isinstance(summary, Mapping):
                 add(result.get("symbol"), summary.get("last_close"))
+        elif tool == "technical_analysis":
+            # The live price only: indicator levels (averages, pivots) are not quotes.
+            add(result.get("symbol"), result.get("price"))
         elif tool == "research_snapshot":
             items = result.get("symbols")
             for item in items if isinstance(items, list) else []:

@@ -31,6 +31,7 @@ from trading_agent.execution.executor import (
 from trading_agent.health import CheckStatus, format_age, overall_ok, run_healthchecks
 from trading_agent.learning.service import LearningError
 from trading_agent.mcp_server.server import build_server
+from trading_agent.mcp_server.tools import ResearchToolError
 from trading_agent.observability.logging import configure_logging
 from trading_agent.orchestration.cycle import DailyCycle, DayResult
 from trading_agent.reporting.delivery import DeliveryError, post_webhook, save_report
@@ -880,6 +881,56 @@ def watch(
         )
     for error in report.errors:
         typer.secho(f"Warning: {error}", fg=typer.colors.YELLOW, err=True)
+
+
+@app.command()
+def technicals(
+    symbol: Annotated[str, typer.Argument(help="Stock ticker, e.g. AAPL.")],
+    as_json: Annotated[bool, typer.Option("--json", help="Machine-readable output.")] = False,
+    env: EnvOption = None,
+    config_dir: ConfigDirOption = None,
+) -> None:
+    """Every technical indicator for one stock, with readings (ADR 0020). No LLM, no orders."""
+    container = _container(env, config_dir)
+    try:
+        tools = container.build_research_tools()
+    except ConfigError as exc:
+        typer.secho(f"Configuration error: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=2) from exc
+    try:
+        report = tools.technical_analysis(symbol)
+    except ResearchToolError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1) from exc
+    if as_json:
+        typer.echo(json.dumps(report, indent=2))
+        return
+    trend, momentum, levels = report["trend"], report["momentum"], report["levels"]
+    typer.echo(f"{report['symbol']} technicals at ${report['price']}")
+    typer.echo(
+        f"Bias: {report['bias']} ({report['bullish']} bullish, {report['bearish']} bearish, "
+        f"{report['neutral']} neutral)"
+    )
+    typer.echo(
+        f"  Averages  20d {trend['sma_20']}  50d {trend['sma_50']}  200d {trend['sma_200']}"
+        f"   RSI {momentum['rsi_14']}  ADX {trend['adx']}"
+    )
+    typer.echo(
+        f"  Levels    supports {levels['supports'] or '-'}  resistances "
+        f"{levels['resistances'] or '-'}  52w {levels['low_52w']}-{levels['high_52w']}"
+    )
+    if report["intraday"]:
+        today = report["intraday"]
+        typer.echo(
+            f"  Today     VWAP {today['vwap']}  opening range "
+            f"{today['opening_range_low']}-{today['opening_range_high']}"
+        )
+    marks = {"bullish": "+", "bearish": "-", "neutral": " "}
+    for reading in report["signals"]:
+        typer.echo(f"  {marks[reading['signal']]} {reading['name']:<18} {reading['note']}")
+    for warning in report["warnings"]:
+        typer.secho(f"Warning: {warning}", fg=typer.colors.YELLOW, err=True)
+    typer.echo(report["notice"])
 
 
 @app.command()

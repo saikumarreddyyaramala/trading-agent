@@ -34,7 +34,7 @@ from trading_agent.domain.models import (
 from trading_agent.domain.ports import BrokerPort, MarketDataPort
 from trading_agent.observability.logging import get_logger
 from trading_agent.risk.eligibility import asset_issues, liquidity_issues, price_issues
-from trading_agent.risk.scoring import MIN_BARS, score_trade
+from trading_agent.risk.scoring import TECHNICAL_BARS, score_trade
 from trading_agent.settings.models import AppConfig
 
 CENT = Decimal("0.01")
@@ -141,7 +141,7 @@ class RiskEngine:
                     "daily bars",
                     # Enough for both the liquidity average and the trade score.
                     lambda: self._market_data.get_daily_bars(
-                        [symbol], days=max(risk.volume_lookback_days, MIN_BARS + 9)
+                        [symbol], days=max(risk.volume_lookback_days, TECHNICAL_BARS)
                     ).get(symbol, ()),
                     errors,
                 )

@@ -103,6 +103,7 @@ def test_clean_uptrend_scores_high_and_passes() -> None:
         "Extension",
         "Confidence",
         "History",
+        "Technicals",
     ]
     rr = _component(score, "Reward/risk")
     assert score.reward_risk == D("1.88")  # (10 - 2x0.1) / (5 + 2x0.1)
@@ -114,10 +115,13 @@ def test_clean_uptrend_scores_high_and_passes() -> None:
     assert _component(score, "Extension").value == D("1.00")
     assert _component(score, "Confidence").value == D("0.60")
     assert _component(score, "History").value == D("0.50")
-    # 20x0.88 + 20 + 25 + 15 + 10x0.6 + 10x0.5 = 88.6
-    assert score.total == D("88.6")
+    # A straight line up: RSI 100 is overbought, the other three checks pass (30 bars are
+    # too few for MACD).
+    assert _component(score, "Technicals").value == D("0.75")
+    # (20x0.88 + 20 + 25 + 15 + 10x0.6 + 10x0.5 + 20x0.75) / 120 = 86.3
+    assert score.total == D("86.3")
     assert score.expected_value_pct is None
-    assert score.summary == "88.6/100 (needs 60)"
+    assert score.summary == "86.3/100 (needs 60)"
 
 
 # ---------- Hard fails ----------
@@ -177,8 +181,9 @@ def test_low_confidence_and_mixed_signals_can_fail_on_score_alone() -> None:
     scoring = SCORING.model_copy(update={"min_score": D(75)})
     score = _score(bars=down, confidence="low", scoring=scoring)
     assert score.hard_fails == ()
-    assert not score.passed  # 17.6 + 20 + 0 + 15 + 2 + 5 = 59.6 < 75
-    assert score.total == D("59.6")
+    # (17.6 + 20 + 0 + 15 + 2 + 5 + 20x0.13) / 120 = 51.8 < 75
+    assert not score.passed
+    assert score.total == D("51.8")
 
 
 def test_history_counts_only_once_there_is_enough() -> None:
@@ -221,6 +226,7 @@ def test_weights_come_from_config() -> None:
                 "extension": 0,
                 "confidence": 0,
                 "history": 0,
+                "technicals": 0,
             }
         }
     )
@@ -241,12 +247,66 @@ def test_scoring_config_is_validated() -> None:
                         "extension": 0,
                         "confidence": 0,
                         "history": 0,
+                        "technicals": 0,
                     }
                 }
             }
         )
     with pytest.raises(ValueError, match="scoring"):
         AppConfig.model_validate({"scoring": {"min_stop_atr": 0}})
+
+
+# ---------- Technicals (ADR 0020) ----------
+
+
+def _healthy(n: int = 60) -> list[Bar]:
+    """Two steps up, one step back: a steady trend that is not overbought."""
+    closes, price = [], D(80)
+    for i in range(n):
+        price += D("-0.2") if i % 3 == 2 else D("0.2")
+        closes.append(price)
+    return _bars(closes, spread=D("0.8"))
+
+
+def test_a_healthy_trend_earns_full_technical_marks() -> None:
+    bars = _healthy()
+    score = _score(bars=bars, price=str(bars[-1].close))
+    technicals = _component(score, "Technicals")
+    assert technicals.value == D("1.00")
+    assert "RSI" in technicals.detail
+    assert "5 of 5" in technicals.detail
+
+
+def test_a_straight_line_rally_is_marked_down_as_overbought() -> None:
+    rally = _uptrend(n=60)  # every day up: RSI 100
+    score = _score(bars=rally, price=str(rally[-1].close))
+    technicals = _component(score, "Technicals")
+    assert "overbought" in technicals.detail
+    healthy = _healthy()
+    assert (
+        technicals.value
+        < _component(_score(bars=healthy, price=str(healthy[-1].close)), "Technicals").value
+    )
+
+
+def test_a_downtrend_scores_poorly_on_technicals() -> None:
+    down = _bars([D(110) - D("0.2") * i + (D("0.3") if i % 3 == 2 else 0) for i in range(60)])
+    score = _score(bars=down, price=str(down[-1].close))
+    assert _component(score, "Technicals").value <= D("0.25")
+
+
+def test_technicals_without_enough_history_are_neutral() -> None:
+    score = _score(bars=_uptrend(n=12))
+    technicals = _component(score, "Technicals")
+    assert technicals.value == D("0.50")
+    assert technicals.detail == "not enough price history: neutral"
+
+
+def test_technicals_use_what_the_history_allows() -> None:
+    # 30 bars: too few for MACD (needs 35), enough for the other four checks.
+    detail = _component(_score(), "Technicals").detail
+    assert "of 4" in detail
+    assert "MACD" not in detail
 
 
 # ---------- Properties over random markets ----------

@@ -22,7 +22,7 @@ from trading_agent.llm.errors import LLMError
 from trading_agent.llm.gateway import LLMGateway
 from trading_agent.observability.logging import get_logger
 
-PLAYBOOK_PROMPT_VERSION = "playbook-2026-10-17.1"
+PLAYBOOK_PROMPT_VERSION = "playbook-2026-10-17.2"
 _NAME = re.compile(r"^[a-z0-9][a-z0-9-]{2,39}$")
 
 SYSTEM_PROMPT = """\
@@ -30,8 +30,10 @@ You turn the lessons an automated US stock trading system learned from its own r
 ONE short, reusable research procedure (a playbook) for its analyst.
 
 The analyst researches with read-only tools (market_status, get_most_active,
-research_snapshot, get_daily_bars, get_news, get_quote) and proposes at most one intraday long
-trade, or no trade. A code-enforced critic, trade score, and risk engine decide what happens.
+research_snapshot, technical_analysis, get_daily_bars, get_news, get_quote) and proposes at
+most one intraday long trade, or no trade. technical_analysis returns every standard
+indicator with a bullish, bearish, or neutral reading and an overall bias. A code-enforced
+critic, trade score, and risk engine decide what happens.
 
 Rules:
 - The playbook says what to check and how to judge it, in 2 to 6 concrete steps that use the

@@ -320,3 +320,32 @@ def test_movers_errors_are_wrapped_and_limits_bounded() -> None:
         adapter.get_movers(5)
     with pytest.raises(ValueError, match="between 1 and 50"):
         adapter.get_movers(51)
+
+
+# ---------- Intraday bars (ADR 0020) ----------
+
+
+def test_intraday_bars_use_the_real_time_feed_and_minute_frames() -> None:
+    client = _DataClient(bars={"AAPL": [_bar(0, 101.0), _bar(1, 100.0)]})
+    adapter, _ = _adapter(data_client=client)
+    start = NOW - timedelta(hours=3)
+    bars = adapter.get_intraday_bars(["AAPL"], minutes=5, start=start)["AAPL"]
+    assert [b.close for b in bars] == [Decimal("100.0"), Decimal("101.0")]  # oldest first
+    request = client.requests[-1]
+    assert request.timeframe.amount_value == 5
+    assert request.timeframe.unit_value == TimeFrameUnit.Minute
+    assert request.feed == DataFeed.IEX  # real time on the free plan
+    assert request.start == start.replace(tzinfo=None)  # the SDK keeps UTC without a zone
+    assert adapter.get_intraday_bars([], minutes=5, start=start) == {}
+
+
+def test_intraday_frames_are_limited() -> None:
+    adapter, _ = _adapter(data_client=_DataClient())
+    with pytest.raises(ValueError, match="minutes must be one of"):
+        adapter.get_intraday_bars(["AAPL"], minutes=7, start=NOW)
+
+
+def test_intraday_errors_are_wrapped() -> None:
+    adapter, _ = _adapter(data_client=_DataClient(fail=True))
+    with pytest.raises(MarketDataError, match="could not fetch intraday bars"):
+        adapter.get_intraday_bars(["AAPL"], minutes=15, start=NOW)

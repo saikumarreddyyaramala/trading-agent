@@ -94,3 +94,11 @@ def test_principles_lessons_and_playbooks_are_separate(config_dir: Path) -> None
     assert "- [entry, 2026-10-15] Fresh hunch." in prompt[lessons:playbooks]
     assert "1. Check the gap size with get_quote." in prompt[playbooks:]
     assert "### old-one: Earnings gap check (active)" in prompt[playbooks:]
+
+
+def test_system_prompt_teaches_technical_analysis(config_dir: Path) -> None:
+    prompt = " ".join(system_prompt(load_config("paper", config_dir)).split())
+    assert "technical_analysis" in prompt
+    assert "Indicators describe the past" in prompt
+    assert "cite the reading" in prompt
+    assert "overbought" in prompt

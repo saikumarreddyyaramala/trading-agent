@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import re
 from datetime import timedelta
 from decimal import Decimal
 
-from hypothesis import given
+from hypothesis import example, given
 from hypothesis import strategies as st
 
 from tests.conftest import NOW
@@ -81,13 +82,15 @@ def test_age_text() -> None:
 
 
 @given(headline=st.text(max_size=500), summary=st.text(max_size=800))
+@example(headline="", summary="><")  # stray angle brackets are text, not a tag
+@example(headline="", summary="a <b>bold</b> <i claim")
 def test_any_text_makes_a_bounded_card(headline: str, summary: str) -> None:
     card = news_card(
         article(headline=headline or "x", summary=summary), NOW, moves={}, watched=set()
     )
     assert len(card.headline) <= 140
     assert len(card.key_fact) <= 200
-    assert "<" not in card.key_fact or ">" not in card.key_fact
+    assert re.search(r"<[^>]*>", card.key_fact) is None  # no markup tag survives
 
 
 def test_sentences_glued_without_a_space_still_split() -> None:

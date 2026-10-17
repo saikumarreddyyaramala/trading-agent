@@ -18,7 +18,7 @@ from alpaca.data.requests import (
     StockLatestQuoteRequest,
     StockSnapshotRequest,
 )
-from alpaca.data.timeframe import TimeFrame
+from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 from alpaca.trading.client import TradingClient
 
 from trading_agent.data.errors import MarketDataError
@@ -33,6 +33,8 @@ SIP_HISTORY_DELAY = timedelta(minutes=16)
 MAX_MOST_ACTIVE = 100
 # Largest list of gainers (and of losers) the movers screener returns.
 MAX_MOVERS = 50
+# Intraday frames the technical analysis uses (ADR 0020).
+INTRADAY_MINUTES = (1, 5, 15, 30, 60)
 
 
 def _decimal(value: Any) -> Decimal:
@@ -214,3 +216,47 @@ class AlpacaMarketData:
             for direction, items in (("gainer", raw.gainers), ("loser", raw.losers))
             for item in items
         )
+
+    def get_intraday_bars(
+        self, symbols: Sequence[str], *, minutes: int, start: datetime
+    ) -> dict[str, tuple[Bar, ...]]:
+        """Minute bars from `start` until now, oldest first. Uses the quote feed (IEX on the
+        free plan), which is real time; free SIP history would lag by 15 minutes."""
+        if minutes not in INTRADAY_MINUTES:
+            raise ValueError(f"minutes must be one of {INTRADAY_MINUTES}")
+        if not symbols:
+            return {}
+        request = StockBarsRequest(
+            symbol_or_symbols=list(symbols),
+            timeframe=TimeFrame(minutes, TimeFrameUnit.Minute),
+            start=start,
+            feed=self._quote_feed,
+        )
+        try:
+            raw = self._data.get_stock_bars(request)
+        except Exception as exc:
+            raise MarketDataError(
+                f"could not fetch intraday bars: {type(exc).__name__}: {exc}"
+            ) from exc
+        return {
+            symbol: tuple(
+                sorted(
+                    (
+                        Bar(
+                            symbol=symbol,
+                            timestamp=bar.timestamp,
+                            open=_decimal(bar.open),
+                            high=_decimal(bar.high),
+                            low=_decimal(bar.low),
+                            close=_decimal(bar.close),
+                            volume=int(bar.volume),
+                            vwap=None if bar.vwap is None else _decimal(bar.vwap),
+                        )
+                        for bar in bars
+                    ),
+                    key=lambda b: b.timestamp,
+                )
+            )
+            for symbol, bars in raw.data.items()
+            if bars
+        }

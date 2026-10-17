@@ -153,7 +153,8 @@ scoring:
   max_extension_atr: 3          # reject buying this many ranges above the 20-day average
   min_history_trades: 10        # own closed trades needed before history counts
   history_trades: 50
-  weights: {reward_risk: 20, volatility: 20, trend: 25, extension: 15, confidence: 10, history: 10}
+  weights: {reward_risk: 20, volatility: 20, trend: 25, extension: 15, confidence: 10, history: 10,
+            technicals: 20}
 
 # Pre-market and after-hours watch, and the next-day plan (ADR 0016). See them with
 # `trading-agent watch` and `trading-agent plan`.

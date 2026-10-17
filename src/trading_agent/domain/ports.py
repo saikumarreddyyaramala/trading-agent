@@ -77,6 +77,12 @@ class MarketDataPort(Protocol):
         """The most recent `days` daily bars per symbol, oldest first."""
         ...
 
+    def get_intraday_bars(
+        self, symbols: Sequence[str], *, minutes: int, start: datetime
+    ) -> dict[str, tuple[Bar, ...]]:
+        """Minute bars (1, 5, 15, 30, or 60) from `start` until now, oldest first."""
+        ...
+
     def get_snapshots(self, symbols: Sequence[str]) -> dict[str, Snapshot]:
         """Latest trade (extended hours included) and the last two daily sessions."""
         ...

@@ -121,6 +121,7 @@ def test_defaults_apply_when_arguments_are_omitted() -> None:
         ("get_asset", {"symbol": "MSFT"}),
         ("get_most_active", {}),
         ("research_snapshot", {"symbols": ["AAPL", "MSFT"]}),
+        ("technical_analysis", {"symbol": "AAPL"}),
     ],
 )
 def test_every_tool_answers(name: str, args: dict[str, Any]) -> None:
