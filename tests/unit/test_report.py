@@ -172,9 +172,9 @@ def test_trading_day_report(store: SqlAuditStore) -> None:
     assert report.analysis.cost_usd is None  # no prices configured: tokens only
     assert report.risk is not None
     assert report.risk.approved
-    assert report.trade is not None
-    assert report.trade.pnl_usd == Decimal("1.00")
-    assert report.trade.return_pct == Decimal("2.00")
+    (trade,) = report.trades
+    assert trade.pnl_usd == Decimal("1.00")
+    assert trade.return_pct == Decimal("2.00")
     assert report.benchmark_pct == Decimal("0.50")
     assert report.excess_pct == Decimal("1.50")
     assert report.exits == ["force_close: force close at 15:50"]
@@ -254,7 +254,7 @@ def test_day_without_a_cycle(store: SqlAuditStore) -> None:
     assert report.cycle_status is None
     assert report.analysis is None
     assert report.risk is None
-    assert report.trade is None
+    assert report.trades == []
     assert report.performance.trades == 0
 
 
@@ -285,7 +285,7 @@ def test_missing_data_becomes_warnings_not_failures(store: SqlAuditStore) -> Non
     assert report.account_equity is None
     # FakeMarketData(fail=True) only fails quotes; bars are simply missing here.
     assert any("account unavailable" in w for w in report.warnings)
-    assert report.trade is not None
+    assert report.trades
 
 
 def test_benchmark_outage_is_a_warning(store: SqlAuditStore) -> None:
@@ -644,3 +644,128 @@ def test_no_learning_section_when_disabled_or_unreadable(store: SqlAuditStore) -
             raise AuditError("db down")
 
     assert _builder(_Down()).build(DAY).learning is None
+
+
+# ---------- Several trade slots (ADR 0015) ----------
+
+
+def _score_json(total: str = "72.5") -> dict[str, Any]:
+    return {
+        "total": total,
+        "min_score": "60",
+        "passed": True,
+        "components": [
+            {"name": "Trend", "value": "1.00", "weight": "25", "detail": "price above average"},
+            {"name": "History", "value": "0.50", "weight": "10", "detail": "3 of 10: neutral"},
+        ],
+        "hard_fails": [],
+    }
+
+
+def _record_slot(store: SqlAuditStore, number: int, symbol: str, exit_price: str) -> str:
+    from trading_agent.domain.models import ScoreComponent, TradeScore
+
+    run_id = f"{RUN}-{number}"
+    store.start_run(run_id, "daily")
+    proposal = PROPOSAL.model_copy(update={"symbol": symbol})
+    store.record_analysis(
+        AnalystResult(
+            run_id=run_id,
+            status="proposed",
+            reason="evidence verified",
+            proposal=proposal,
+            prompt_version="p",
+            turns=2,
+            tool_calls=(),
+            usage=LLMUsage(input_tokens=1, output_tokens=1),
+            started_at=_ny(10, 30),
+            duration_seconds=1,
+        )
+    )
+    plan = OrderPlan(
+        symbol=symbol,
+        quantity=Decimal("0.5"),
+        fractional=True,
+        notional_usd=Decimal("50"),
+        entry_reference_price=Decimal("100"),
+        limit_price=Decimal("102"),
+        stop_loss_price=Decimal("95"),
+        take_profit_price=Decimal("110"),
+    )
+    score = TradeScore(
+        total=Decimal("72.5"),
+        min_score=Decimal(60),
+        passed=True,
+        components=(
+            ScoreComponent(name="Trend", value=Decimal(1), weight=Decimal(25), detail="up"),
+        ),
+        hard_fails=(),
+        reward_risk=Decimal("1.88"),
+        atr_pct=Decimal("2.00"),
+        stop_atr=Decimal("2.50"),
+        extension_atr=Decimal("0.53"),
+        expected_value_pct=None,
+        history_trades=1,
+    )
+    store.record_risk_decision(
+        run_id,
+        RiskDecision(
+            approved=True,
+            symbol=symbol,
+            checks=(RiskCheck(name="All", passed=True, detail=""),),
+            plan=plan,
+            evaluated_at=_ny(10, 31),
+            score=score,
+        ),
+    )
+    entry = _order(f"ta-{run_id}-entry", "buy", "100", _ny(10, 31))
+    exit_order = _order(f"close-{number}", "sell", exit_price, _ny(15, 50))
+    store.record_orders(
+        run_id,
+        [
+            entry.model_copy(update={"symbol": symbol}),
+            exit_order.model_copy(update={"symbol": symbol}),
+        ],
+    )
+    store.finish_run(run_id, "traded", f"entered 0.5 {symbol} at $100")
+    return run_id
+
+
+def test_a_day_with_several_slots_reports_every_trade(store: SqlAuditStore) -> None:
+    _record_trading_day(store)  # slot 1: AAPL +2%
+    _record_slot(store, 2, "MSFT", "99")  # slot 2: MSFT -1%
+    report = _builder(store).build(DAY)
+
+    assert [t.symbol for t in report.trades] == ["AAPL", "MSFT"]
+    assert report.excess_pct == Decimal("0.00")  # mean of +2% and -1%, minus SPY's +0.5%
+    (slot,) = report.slots
+    assert (slot.run_id, slot.status, slot.symbol) == (f"{RUN}-2", "traded", "MSFT")
+    assert slot.score == "72.5/100 (needs 60)"
+    markdown = render_markdown(report)
+    assert "## Trade slots" in markdown
+    assert f"| 2 | `{RUN}-2` | TRADED | MSFT | 72.5/100 (needs 60) |" in markdown
+    assert "| AAPL |" in markdown
+    assert "| MSFT |" in markdown
+
+
+def test_the_risk_section_shows_the_trade_score(store: SqlAuditStore) -> None:
+    _record_slot(store, 2, "MSFT", "101")
+    store.start_run(RUN, "daily")
+    report = _builder(store).build(DAY)
+    (slot,) = report.slots
+    assert slot.score_detail == "trend 1.00"
+
+
+def test_unreadable_slots_are_a_warning(store: SqlAuditStore) -> None:
+    _record_trading_day(store)
+    real = store.get_run
+
+    def flaky(run_id: str) -> Any:
+        if run_id.endswith("-2"):
+            raise AuditError("db down")
+        return real(run_id)
+
+    store.get_run = flaky  # type: ignore[method-assign]
+    report = _builder(store).build(DAY)
+    assert report.slots == []
+    assert "trade slots unavailable: db down" in report.warnings

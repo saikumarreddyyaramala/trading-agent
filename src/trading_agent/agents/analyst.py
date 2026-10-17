@@ -115,7 +115,7 @@ class AnalystAgent:
         self._clock = clock or (lambda: datetime.now(UTC))
         self._log = logger or get_logger(__name__)
 
-    async def run(self, run_id: str | None = None) -> AnalystResult:
+    async def run(self, run_id: str | None = None, context: str | None = None) -> AnalystResult:
         """One research run. `run_id` ties it to a larger run, such as the daily cycle."""
         run_id = run_id or uuid.uuid4().hex[:12]
         started_at = self._clock()
@@ -160,7 +160,8 @@ class AnalystAgent:
             system = system_prompt(self._config, self._lessons)
             messages = [
                 ChatMessage(
-                    role="user", content=task_prompt(started_at, self._config.schedule.timezone)
+                    role="user",
+                    content=task_prompt(started_at, self._config.schedule.timezone, context),
                 )
             ]
             repairs_left = self._limits.repair_attempts

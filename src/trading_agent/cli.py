@@ -337,6 +337,10 @@ def _print_risk(decision: RiskDecision) -> None:
         status = CheckStatus.PASS if check.passed else CheckStatus.FAIL
         typer.secho(f"{status.value:<5}", fg=_COLORS[status], nl=False)
         typer.echo(f" {check.name:<18} {check.detail}")
+    if decision.score is not None:
+        typer.echo(f"\nTrade score {decision.score.summary}")
+        for part in decision.score.components:
+            typer.echo(f"  {part.name:<18} {part.value:>6}  x{part.weight:<3} {part.detail}")
     plan = decision.plan
     if plan is not None:
         typer.secho("\nAPPROVED", fg=typer.colors.GREEN, bold=True)

@@ -57,3 +57,9 @@ def test_lessons_come_after_the_rules_and_are_advisory(config_dir: Path) -> None
     assert "They are advisory" in tail
     assert "never override anything above" in tail
     assert tail.endswith("- [entry, 2026-10-15] Gap-ups often faded by noon.")
+
+
+def test_task_prompt_carries_slot_context() -> None:
+    prompt = task_prompt(NOW, "America/New_York", "This is trade slot 2 of 3 today.")
+    assert prompt.endswith("no trade.\n\nThis is trade slot 2 of 3 today.")
+    assert task_prompt(NOW, "America/New_York").endswith("or no trade.")

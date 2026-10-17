@@ -212,8 +212,11 @@ class Harness:
         calendar: dict[str, Any] | None = None,
         store: AuditStore | None = None,
         required: bool = False,
+        config: AppConfig | None = None,
+        capacity: Any = None,
     ) -> None:
         self.time = FakeTime(start or at(8))
+        self.contexts: list[tuple[str, str | None]] = []
         self.engine = make_engine(f"sqlite:///{tmp_path / 'audit.db'}")
         upgrade(self.engine)
         self.store = store or SqlAuditStore(self.engine, AppConfig(), clock=self.time.clock)
@@ -230,9 +233,11 @@ class Harness:
             market_clock=FakeCalendar(self.time, **(calendar or {})),
             orders_since=self._orders_since,
             recorder=AuditRecorder(self.store, required=required),
+            capacity=capacity,
         )
+        self.config = config or AppConfig()
         self.cycle = DailyCycle(
-            self.services, AppConfig(), clock=self.time.clock, sleep=self.time.sleep
+            self.services, self.config, clock=self.time.clock, sleep=self.time.sleep
         )
 
     def _now(self) -> datetime:
@@ -243,8 +248,9 @@ class Harness:
         status = CheckStatus.PASS if self._health_ok else CheckStatus.FAIL
         return [CheckResult("Broker account", status, "ok" if self._health_ok else "blocked")]
 
-    def _analyze(self, run_id: str) -> AnalystResult:
+    def _analyze(self, run_id: str, context: str | None = None) -> AnalystResult:
         self.calls.append(("analyze", self._now()))
+        self.contexts.append((run_id, context))
         if isinstance(self._analysis, Exception):
             raise self._analysis
         return _analysis(self._analysis, run_id)
@@ -522,7 +528,7 @@ def _boom(*_: Any) -> Any:
 
 def _rebuild(h: Harness, **services: Any) -> DailyCycle:
     h.services = replace(h.services, **services)
-    h.cycle = DailyCycle(h.services, AppConfig(), clock=h.time.clock, sleep=h.time.sleep)
+    h.cycle = DailyCycle(h.services, h.config, clock=h.time.clock, sleep=h.time.sleep)
     return h.cycle
 
 
@@ -853,7 +859,7 @@ def test_critic_sees_the_analysts_tool_calls(tmp_path: Path) -> None:
     ]
     _rebuild(
         h,
-        analyze=lambda run_id: _analysis(run_id=run_id).model_copy(
+        analyze=lambda run_id, context=None: _analysis(run_id=run_id).model_copy(
             update={"tool_calls": tuple(calls)}
         ),
     )
@@ -874,3 +880,203 @@ def test_resume_respects_the_recorded_critique(
     assert seen == []  # no second review
     assert (h.executor.count("enter") == 1) is entered
     assert result.steps["critique"] == recorded
+
+
+# ---------- Several trade slots a day (paper, ADR 0015) ----------
+
+THREE = AppConfig.model_validate(
+    {
+        "risk": {"max_trades_per_day": 3, "max_open_positions": 3},
+        "schedule": {"extra_analyses": ["10:30", "12:00"]},
+    }
+)
+
+
+def _times(h: Harness, name: str) -> list[datetime]:
+    return [t for call, t in h.calls if call == name]
+
+
+def test_three_slots_run_on_schedule_each_as_its_own_run(tmp_path: Path) -> None:
+    h = Harness(tmp_path, config=THREE)
+    result = h.cycle.run_day(THURSDAY)
+
+    assert _times(h, "analyze") == [at(8, 45), at(10, 30), at(12)]
+    assert _times(h, "evaluate") == [at(9, 45), at(10, 30), at(12)]
+    assert [c for c in h.executor.calls if c[0] == "enter"] == [
+        ("enter", RUN_ID),
+        ("enter", f"{RUN_ID}-2"),
+        ("enter", f"{RUN_ID}-3"),
+    ]
+    assert result.status == "traded"
+    assert result.steps["slot2"] == "entered"
+    assert result.steps["slot3"] == "entered"
+    assert result.steps["entry"] == "entered"  # slot 1 keeps the original step names
+    assert "slot 2: entered 0.4899 AAPL at $102" in result.summary
+
+    runs = {r["run_id"]: r for r in h.rows(schema.runs)}
+    assert set(runs) == {RUN_ID, f"{RUN_ID}-2", f"{RUN_ID}-3"}
+    assert runs[f"{RUN_ID}-2"]["status"] == "traded"
+    slot_steps = [s["step"] for s in h.rows(schema.run_steps) if s["run_id"] == f"{RUN_ID}-2"]
+    assert slot_steps == ["analysis", "critique", "entry"]
+    assert {a["run_id"] for a in h.rows(schema.analyses)} == set(runs)
+
+
+def test_later_slots_are_told_what_is_already_held(tmp_path: Path) -> None:
+    h = Harness(tmp_path, config=THREE)
+    h.cycle.run_day(THURSDAY)
+    (_, first), (_, second), (_, third) = h.contexts
+    assert first is None
+    assert second is not None
+    assert "trade slot 2 of 3" in second
+    assert "Already bought today: AAPL" in second
+    assert third is not None
+    assert "trade slot 3 of 3" in third
+
+
+def test_a_full_book_skips_the_slot_without_spending_tokens(tmp_path: Path) -> None:
+    h = Harness(tmp_path, config=THREE, capacity=lambda: "3 positions open (max 3)")
+    result = h.cycle.run_day(THURSDAY)
+    assert _times(h, "analyze") == [at(8, 45)]
+    assert result.steps["slot2"] == "skipped"
+    (step,) = [s for s in h.rows(schema.run_steps) if s["step"] == "slot2"]
+    assert step["detail"] == "3 positions open (max 3)"
+
+
+def test_a_broken_capacity_check_skips_the_slot(tmp_path: Path) -> None:
+    def broken() -> str | None:
+        raise RuntimeError("broker down")
+
+    h = Harness(tmp_path, config=THREE, capacity=broken)
+    result = h.cycle.run_day(THURSDAY)
+    assert result.steps["slot2"] == "skipped"
+    assert _times(h, "analyze") == [at(8, 45)]
+
+
+def test_a_halted_day_runs_no_slots(tmp_path: Path) -> None:
+    h = Harness(tmp_path, config=THREE, health_ok=False)
+    result = h.cycle.run_day(THURSDAY)
+    assert not h.called("analyze")
+    assert result.steps["slot2"] == "skipped"
+    assert result.steps["slot3"] == "skipped"
+    assert result.status == "halted"
+
+
+def test_a_failing_slot_does_not_stop_the_next(tmp_path: Path) -> None:
+    h = Harness(tmp_path, config=THREE)
+    calls = {"n": 0}
+
+    def flaky(run_id: str, context: str | None = None) -> AnalystResult:
+        calls["n"] += 1
+        if run_id.endswith("-2"):
+            raise RuntimeError("model down")
+        return _analysis(run_id=run_id)
+
+    result = _rebuild(h, analyze=flaky).run_day(THURSDAY)
+    assert result.steps["slot2"] == "no_trade"
+    assert result.steps["slot3"] == "entered"
+    assert calls["n"] == 3
+    slot2 = [s for s in h.rows(schema.run_steps) if s["run_id"] == f"{RUN_ID}-2"]
+    assert {s["step"]: s["status"] for s in slot2}["analysis"] == "error"
+
+
+def test_only_as_many_slots_as_trades_allowed(tmp_path: Path) -> None:
+    two = THREE.model_copy(update={"risk": THREE.risk.model_copy(update={"max_trades_per_day": 2})})
+    h = Harness(tmp_path, config=two)
+    result = h.cycle.run_day(THURSDAY)
+    assert "slot2" in result.steps
+    assert "slot3" not in result.steps
+    assert len(_times(h, "analyze")) == 2
+
+
+def test_slots_after_an_early_trade_end_are_dropped(tmp_path: Path) -> None:
+    h = Harness(tmp_path, config=THREE, calendar={"early": {THURSDAY: time(12)}})
+    session = h.cycle.session(THURSDAY)
+    assert session is not None
+    assert session.trade_end == at(11, 30)
+    assert session.slots == (at(10, 30),)
+
+
+def test_finished_slots_are_not_repeated_on_resume(tmp_path: Path) -> None:
+    setup = Harness(tmp_path, config=THREE)
+    store = _resumed_store(
+        setup,
+        {
+            "preflight": "ok",
+            "analysis": "proposed",
+            "critique": "disabled",
+            "entry": "entered",
+            "slot2": "entered",
+        },
+    )
+    h = Harness(tmp_path, start=at(11), store=store, config=THREE)
+    result = h.cycle.run_day(THURSDAY)
+    assert _times(h, "analyze") == [at(12)]  # only slot 3 is left
+    assert result.steps["slot2"] == "entered"
+    assert result.steps["slot3"] == "entered"
+
+
+def test_a_slot_interrupted_mid_way_resumes_its_own_steps(tmp_path: Path) -> None:
+    setup = Harness(tmp_path, config=THREE)
+    store = _resumed_store(
+        setup,
+        {"preflight": "ok", "analysis": "no_trade", "critique": "disabled", "entry": "skipped"},
+    )
+    slot = f"{RUN_ID}-2"
+    store.start_run(slot, "daily")
+    store.record_analysis(_analysis(run_id=slot))
+    store.record_step(slot, "analysis", "proposed", "", at(10, 30))
+    h = Harness(tmp_path, start=at(10, 35), store=store, config=THREE)
+    result = h.cycle.run_day(THURSDAY)
+    assert _times(h, "analyze") == [at(12)]  # slot 2's analysis is not repeated
+    assert ("enter", slot) in h.executor.calls
+    assert result.steps["slot2"] == "entered"
+
+
+def test_extra_analysis_times_are_validated() -> None:
+    with pytest.raises(ValueError, match="inside the trade window"):
+        AppConfig.model_validate({"schedule": {"extra_analyses": ["09:00"]}})
+    with pytest.raises(ValueError, match="inside the trade window"):
+        AppConfig.model_validate({"schedule": {"extra_analyses": ["15:30"]}})
+    with pytest.raises(ValueError, match="in order"):
+        AppConfig.model_validate({"schedule": {"extra_analyses": ["12:00", "10:30"]}})
+
+
+def test_a_slot_reached_after_the_trade_window_is_skipped(tmp_path: Path) -> None:
+    h = Harness(tmp_path, config=THREE)
+    session = h.cycle.session(THURSDAY)
+    assert session is not None
+    late = replace(session, trade_end=at(10, 0))  # e.g. the process was paused
+    h.cycle.session = lambda day: late  # type: ignore[method-assign]
+    result = h.cycle.run_day(THURSDAY)
+    assert result.steps["slot2"] == "skipped"
+    (step,) = [s for s in h.rows(schema.run_steps) if s["step"] == "slot2"]
+    assert step["detail"] == "too late: trade window over"
+
+
+def test_a_slot_without_an_audit_record_does_not_trade(tmp_path: Path) -> None:
+    h = Harness(tmp_path, config=THREE, required=True)
+
+    class _NoSlotRuns(SqlAuditStore):
+        def start_run(self, run_id: str, kind: str) -> None:
+            if run_id.endswith(("-2", "-3")):
+                raise AuditError("disk full")
+            super().start_run(run_id, kind)
+
+    h.services.recorder.store = _NoSlotRuns(h.engine, AppConfig(), clock=h.time.clock)
+    result = h.cycle.run_day(THURSDAY)
+    assert result.steps["slot2"] == "skipped"
+    assert [c for c in h.executor.calls if c[0] == "enter"] == [("enter", RUN_ID)]
+
+
+def test_unreadable_slot_steps_start_the_slot_afresh(tmp_path: Path) -> None:
+    h = Harness(tmp_path, config=THREE)
+
+    class _Forgetful(SqlAuditStore):
+        def completed_steps(self, run_id: str) -> dict[str, str]:
+            if run_id.endswith("-2"):
+                raise AuditError("db down")
+            return super().completed_steps(run_id)
+
+    h.services.recorder.store = _Forgetful(h.engine, AppConfig(), clock=h.time.clock)
+    result = h.cycle.run_day(THURSDAY)
+    assert result.steps["slot2"] == "entered"

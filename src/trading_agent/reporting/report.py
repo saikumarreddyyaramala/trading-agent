@@ -26,6 +26,7 @@ from trading_agent.reporting.performance import (
     summarize,
     trades_from_orders,
 )
+from trading_agent.reporting.slots import SlotSummary, score_text, slot_runs, summarize_slot
 from trading_agent.settings.models import AppConfig
 from trading_agent.storage.store import AuditError, AuditStore
 
@@ -67,6 +68,8 @@ class RiskSummary(BaseModel):
 
     approved: bool
     failed_checks: list[str]
+    score: str | None = None  # the parametric trade score (ADR 0015)
+    score_detail: str | None = None
 
 
 class LearningSummary(BaseModel):
@@ -104,7 +107,7 @@ class DailyReport(BaseModel):
     analysis: AnalysisSummary | None
     critic: CriticSummary | None
     risk: RiskSummary | None
-    trade: TradeResult | None
+    trades: list[TradeResult]  # every trade of the day, across all slots
     exits: list[str]
     benchmark_symbol: str
     benchmark_pct: Decimal | None
@@ -116,6 +119,7 @@ class DailyReport(BaseModel):
     learning: LearningSummary | None = None
     costs: DayCost | None = None  # from the cost ledger (ADR 0014)
     unpriced_models: list[str] = []
+    slots: list[SlotSummary] = []  # extra trade slots (ADR 0015)
 
 
 class ReportBuilder:
@@ -155,7 +159,7 @@ class ReportBuilder:
             orders = []
             warnings.append(f"orders unavailable: {exc}")
         trades = trades_from_orders(orders, self._zone)
-        today = next((t for t in trades if t.day == day), None)
+        today = [t for t in trades if t.day == day]
 
         bars: tuple[Bar, ...] = ()
         symbol = self._settings.benchmark_symbol
@@ -195,8 +199,18 @@ class ReportBuilder:
             totals = {"analyses": 0, "critiques": 0, "input_tokens": 0, "output_tokens": 0}
 
         excess = None
-        if today is not None and today.return_pct is not None and benchmark_today is not None:
-            excess = today.return_pct - benchmark_today
+        returns = [t.return_pct for t in today if t.return_pct is not None]
+        if returns and benchmark_today is not None:
+            excess = (sum(returns, Decimal(0)) / len(returns) - benchmark_today).quantize(
+                Decimal("0.01")
+            )
+
+        slots: list[SlotSummary] = []
+        if run is not None:  # slots exist only on days the cycle ran
+            try:
+                slots = [summarize_slot(r) for r in slot_runs(self._store, run_id)]
+            except AuditError as exc:
+                warnings.append(f"trade slots unavailable: {exc}")
 
         report = DailyReport(
             day=day,
@@ -209,7 +223,7 @@ class ReportBuilder:
             analysis=self._analysis(run, ledger or []),
             critic=self._critic(run),
             risk=self._risk(run),
-            trade=today,
+            trades=today,
             exits=[f"{e['action']}: {e['detail']}" for e in run["position_events"]] if run else [],
             benchmark_symbol=symbol,
             benchmark_pct=benchmark_today,
@@ -225,6 +239,7 @@ class ReportBuilder:
             warnings=warnings,
             learning=self._learning(day, run_id, run),
             costs=costs.days[0] if costs else None,
+            slots=slots,
             unpriced_models=costs.unpriced_models if costs else [],
         )
         self._log.info("report.built", day=str(day), run_id=run_id, warnings=len(warnings))
@@ -307,7 +322,13 @@ class ReportBuilder:
         if not run or not run["risk_decisions"]:
             return None
         latest = run["risk_decisions"][-1]
-        return RiskSummary(approved=latest["approved"], failed_checks=list(latest["failed_checks"]))
+        score, detail = score_text(latest.get("score"))
+        return RiskSummary(
+            approved=latest["approved"],
+            failed_checks=list(latest["failed_checks"]),
+            score=score,
+            score_detail=detail,
+        )
 
 
 # ---------- Rendering ----------
@@ -399,20 +420,38 @@ def render_markdown(report: DailyReport) -> str:
         lines += ["Approved: every check passed.", ""]
     else:
         lines += [f"Rejected. Failed: {', '.join(report.risk.failed_checks)}.", ""]
+    if report.risk is not None and report.risk.score:
+        lines += [f"Trade score: {report.risk.score} (weakest: {report.risk.score_detail}).", ""]
 
-    lines.append("## Trade")
-    trade = report.trade
-    if trade is None:
+    if report.slots:
+        lines += [
+            "## Trade slots",
+            "",
+            "| Slot | Run | Outcome | Symbol | Score | Detail |",
+            "| --- | --- | --- | --- | --- | --- |",
+        ]
+        lines += [
+            f"| {s.number} | `{s.run_id}` | {(s.status or 'incomplete').upper()} | "
+            f"{s.symbol or '-'} | {s.score or 'n/a'} | {s.summary or ''} |"
+            for s in report.slots
+        ]
+        lines.append("")
+
+    lines.append("## Trades" if len(report.trades) > 1 else "## Trade")
+    if not report.trades:
         lines += ["No trade today.", ""]
     else:
-        exit_price = "n/a" if trade.exit_price is None else f"${trade.exit_price:,.4f}"
         lines += [
             "| Symbol | Quantity | Entry | Exit | P&L | Return | Exit via |",
             "| --- | --- | --- | --- | --- | --- | --- |",
-            f"| {trade.symbol} | {trade.quantity} | ${trade.entry_price:,.4f} | {exit_price} "
-            f"| {_money(trade.pnl_usd)} | {_signed(trade.return_pct)} | {trade.exit_via} |",
-            "",
         ]
+        for trade in report.trades:
+            exit_price = "n/a" if trade.exit_price is None else f"${trade.exit_price:,.4f}"
+            lines.append(
+                f"| {trade.symbol} | {trade.quantity} | ${trade.entry_price:,.4f} | {exit_price} "
+                f"| {_money(trade.pnl_usd)} | {_signed(trade.return_pct)} | {trade.exit_via} |"
+            )
+        lines.append("")
     for event in report.exits:
         lines.append(f"- {event}")
     if report.exits:

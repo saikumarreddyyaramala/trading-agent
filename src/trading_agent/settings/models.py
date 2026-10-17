@@ -33,6 +33,9 @@ class ScheduleConfig(_Strict):
     trade_window_end: time = time(15, 30)
     force_close: time = time(15, 50)
     report: time = time(16, 15)
+    # Extra analysis-and-entry slots during the session (ADR 0015). How many run is capped
+    # by risk.max_trades_per_day, so live (one trade a day) never uses them.
+    extra_analyses: tuple[time, ...] = ()
 
     @field_validator("timezone")
     @classmethod
@@ -55,11 +58,21 @@ class ScheduleConfig(_Strict):
         ]
         if steps != sorted(steps):
             raise ValueError("schedule times must be in chronological order")
+        for extra in self.extra_analyses:
+            if not self.trade_window_start <= extra < self.trade_window_end:
+                raise ValueError(
+                    f"extra analysis at {extra:%H:%M} must be inside the trade window "
+                    f"({self.trade_window_start:%H:%M}-{self.trade_window_end:%H:%M})"
+                )
+        if list(self.extra_analyses) != sorted(set(self.extra_analyses)):
+            raise ValueError("extra analysis times must be unique and in order")
         return self
 
 
 class RiskConfig(_Strict):
     max_trades_per_day: int = Field(default=1, ge=0, le=10)
+    # Positions held at the same time. Live is limited to 1 (ADR 0015).
+    max_open_positions: int = Field(default=1, ge=1, le=5)
     max_position_usd: Decimal = Field(default=Decimal("50"), gt=0)
     stop_loss_pct: Decimal = Field(default=Decimal("5"), gt=0, lt=100)
     take_profit_pct: Decimal = Field(default=Decimal("10"), gt=0)
@@ -168,6 +181,41 @@ class EvaluationConfig(_Strict):
     bootstrap_samples: int = Field(default=5000, ge=500, le=100_000)
 
 
+class ScoreWeights(_Strict):
+    """Relative weight of each part of the trade score. Only the ratios matter."""
+
+    reward_risk: Decimal = Field(default=Decimal(20), ge=0)
+    volatility: Decimal = Field(default=Decimal(20), ge=0)
+    trend: Decimal = Field(default=Decimal(25), ge=0)
+    extension: Decimal = Field(default=Decimal(15), ge=0)
+    confidence: Decimal = Field(default=Decimal(10), ge=0)
+    history: Decimal = Field(default=Decimal(10), ge=0)
+
+    @model_validator(mode="after")
+    def _not_all_zero(self) -> ScoreWeights:
+        if not any(v > 0 for v in self.model_dump().values()):
+            raise ValueError("the trade score needs at least one weight above zero")
+        return self
+
+
+class ScoringConfig(_Strict):
+    """The parametric trade score (ADR 0015): every buy must earn a minimum score from fixed
+    rules, on top of the risk checks. Hard fails reject a trade whatever its score."""
+
+    enabled: bool = True
+    min_score: Decimal = Field(default=Decimal(60), ge=0, le=100)
+    # Target vs stop after paying the spread on the way in and out.
+    min_reward_risk: Decimal = Field(default=Decimal("1.5"), gt=0)
+    # The stop must sit at least this many average daily ranges (ATR) below the entry.
+    min_stop_atr: Decimal = Field(default=Decimal("0.75"), gt=0)
+    # Reject buying a price this many ATRs above its 20-day average.
+    max_extension_atr: Decimal = Field(default=Decimal(3), gt=1)
+    # Past closed trades needed before history counts; until then it is neutral.
+    min_history_trades: int = Field(default=10, ge=1, le=500)
+    history_trades: int = Field(default=50, ge=1, le=1000)  # most recent trades used
+    weights: ScoreWeights = ScoreWeights()
+
+
 class LearningConfig(_Strict):
     """Self-learning (ADR 0013): a daily review turns results into advisory lessons."""
 
@@ -265,6 +313,7 @@ class AppConfig(_Strict):
     evaluation: EvaluationConfig = EvaluationConfig()
     live: LiveConfig = LiveConfig()
     learning: LearningConfig = LearningConfig()
+    scoring: ScoringConfig = ScoringConfig()
     costs: CostsConfig = CostsConfig()
 
     @model_validator(mode="after")
@@ -277,6 +326,13 @@ class AppConfig(_Strict):
             raise ValueError("environment 'live' requires broker.paper = false")
         if self.environment is Environment.LIVE and not self.storage.required:
             raise ValueError("environment 'live' requires storage.required = true")
+        if self.environment is Environment.LIVE and (
+            self.risk.max_trades_per_day > 1 or self.risk.max_open_positions > 1
+        ):
+            raise ValueError(
+                "live trading allows one trade and one position per day (ADR 0015); "
+                "more are for paper data gathering only"
+            )
         return self
 
     @property

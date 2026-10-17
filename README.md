@@ -25,7 +25,7 @@ risk engine, executes on a broker, and reports the result against the S&P 500.
 | 11 | Go live ($100): live gates, hard cap, cash-account checks (operator switches on) | Done |
 | 12 | Self-learning: daily review turns results into advisory, guarded lessons | Done |
 | 13 | Cost ledger: every model call priced, daily LLM budget, failing-tests-first | Done |
-| 14 | Trade scoring gate (expected value); up to 3 paper trades a day | Planned |
+| 14 | Parametric trade score; up to 3 paper trades a day in separate slots | Done |
 | 15 | Pre-market and after-hours watch; next-day to-do list | Planned |
 | 16 | Guidebook, outcome-scored lessons, and playbooks | Planned |
 | 17 | Dashboard backend: live stream, news cards, costs | Planned |
@@ -57,7 +57,8 @@ Key rules (see [ADR 0001](docs/adr/0001-architecture.md), [ADR 0002](docs/adr/00
 [ADR 0007](docs/adr/0007-audit-trail.md), [ADR 0008](docs/adr/0008-daily-cycle.md),
 [ADR 0009](docs/adr/0009-daily-report.md), [ADR 0010](docs/adr/0010-critic-agent.md),
 [ADR 0011](docs/adr/0011-evaluation.md), [ADR 0012](docs/adr/0012-going-live.md),
-[ADR 0013](docs/adr/0013-self-learning.md), and [ADR 0014](docs/adr/0014-cost-ledger.md)):
+[ADR 0013](docs/adr/0013-self-learning.md), [ADR 0014](docs/adr/0014-cost-ledger.md), and
+[ADR 0015](docs/adr/0015-trade-score-and-slots.md)):
 - The AI has read-only tools; it can never place an order directly. Tool inputs are
   validated and bounded, and each session has a call budget.
 - Every model call goes through the LLM gateway (pinned model, fallback, token caps, logs).
@@ -67,6 +68,8 @@ Key rules (see [ADR 0001](docs/adr/0001-architecture.md), [ADR 0002](docs/adr/00
 - A second LLM, the critic, reviews every buy against the exact tool outputs. It can only
   veto; any unsupported claim, invalid answer, or outage also means no trade.
 - Config is versioned YAML; secrets come only from the environment and are redacted.
+- Every buy must also earn a minimum parametric trade score (reward/risk after costs,
+  stop vs volatility, trend, extension, confidence, own history), with hard fails.
 - Any failed or erroring check means "no trade". The risk engine runs 15 checks with its
   own fresh data and sizes positions from cash only (no margin); an approval cannot exist
   without an order plan.
@@ -183,7 +186,8 @@ docs/adr/                architecture decision records
 | preflight | 08:30 | health check; a failure halts new trades for the day |
 | analysis | 08:45 | the analyst researches and proposes one trade or none |
 | critique | after analysis | the critic reviews a buy against the evidence; it can only veto |
-| entry | 09:45 | risk check with fresh data; paper entry with a stop-loss if approved |
+| entry | 09:45 | risk check and trade score with fresh data; entry with a stop-loss if approved |
+| slot 2, 3 | 10:30, 12:00 | paper only: another analysis, critique, risk check, and entry, each its own run |
 | manage | every minute | take profit, keep the stop in place |
 | close | 15:50 | force-close and verify the account is flat (earlier on half-days) |
 | reconcile | 16:15 | sync final order statuses and fills |
@@ -218,6 +222,20 @@ The guardrails (ADR 0013):
 Every analysis records which lessons it used, and the daily report shows what was
 learned and retired. Review them with `trading-agent lessons`. Turn learning off with
 `learning.enabled: false`.
+
+## Trade score and trade slots
+
+Every buy gets a deterministic score from 0 to 100 inside the risk engine (ADR 0015):
+reward/risk after the spread, how far the stop is in average daily ranges (ATR), trend,
+how stretched the price is above its 20-day average, the analyst's confidence, and,
+after 10 closed trades, the system's own results. It needs 60 to trade, and some things
+reject a trade at any score: a stop inside normal daily noise, too little reward after
+costs, an overextended price. See the breakdown with `trading-agent risk-check AAPL
+--price 230`. The score keeps out poor setups; it cannot promise a profit.
+
+On paper the cycle runs up to three trade slots a day (08:45, 10:30, 12:00), each a
+separate audited run (`daily-YYYYMMDD`, `-2`, `-3`), with up to three positions at once.
+Live is limited to one trade and one position, and the config refuses more.
 
 ## Costs
 

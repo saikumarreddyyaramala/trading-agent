@@ -326,6 +326,7 @@ class SqlAuditStore:
                     failed_checks=[c.name for c in decision.failed_checks],
                     checks=[c.model_dump(mode="json") for c in decision.checks],
                     plan=decision.plan.model_dump(mode="json") if decision.plan else None,
+                    score=decision.score.model_dump(mode="json") if decision.score else None,
                 )
             )
 

@@ -573,3 +573,63 @@ def test_replay_of_an_unreviewed_proposal(store: SqlAuditStore) -> None:
     result = replay_critic(store, _Critic("vetoed"), ["daily-20261012"])  # type: ignore[arg-type]
     (item,) = result.items
     assert (item.recorded, item.replayed, item.changed) == ("none", "vetoed", True)
+
+
+# ---------- Several trade slots (ADR 0015) ----------
+
+
+def test_slot_runs_count_as_analyses_but_not_as_days(store: SqlAuditStore) -> None:
+    _history(store)
+    slot = f"daily-{D[0]:%Y%m%d}-2"
+    store.start_run(slot, "daily")
+    store.record_analysis(
+        AnalystResult(
+            run_id=slot,
+            status="proposed",
+            reason="r",
+            proposal=PROPOSAL,
+            prompt_version="p",
+            turns=1,
+            tool_calls=(),
+            usage=LLMUsage(input_tokens=1, output_tokens=1),
+            started_at=_at(D[0], 10, 30),
+            duration_seconds=1,
+        )
+    )
+    store.record_critique(
+        CriticResult(
+            run_id=slot,
+            status="vetoed",
+            model_verdict="veto",
+            summary="s",
+            reasons=(),
+            concerns=(),
+            evidence_checks=(),
+            model="judge",
+            prompt_version="cp",
+            usage=LLMUsage(input_tokens=0, output_tokens=0),
+            created_at=_at(D[0], 10, 31),
+        )
+    )
+    store.finish_run(slot, "no_trade", "vetoed")
+    card = _builder(store).build(D[0], D[4])
+    assert card.funnel.cycle_days == 5  # days, not runs
+    assert card.funnel.analyses == 6
+    assert card.funnel.critic == {"approved": 3, "vetoed": 2}
+    critic = next(c for c in card.counterfactuals if c.gate == "critic")
+    assert critic.stopped == 2  # the slot's vetoed idea is simulated too
+
+
+def test_unreadable_slots_are_a_warning(store: SqlAuditStore) -> None:
+    _history(store)
+    real = store.get_run
+
+    def flaky(run_id: str) -> Any:
+        if run_id.endswith("-2"):
+            raise AuditError("db down")
+        return real(run_id)
+
+    store.get_run = flaky  # type: ignore[method-assign]
+    card = _builder(store).build(D[0], D[4])
+    assert "trade slots unavailable: db down" in card.warnings
+    assert card.funnel.analyses == 5

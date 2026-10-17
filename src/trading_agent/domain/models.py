@@ -289,6 +289,33 @@ class TradeProposal(_Frozen):
 # ---------- Risk decisions ----------
 
 
+class ScoreComponent(_Frozen):
+    name: str
+    value: Decimal = Field(ge=0, le=1)  # 0 = worst, 1 = best
+    weight: Decimal = Field(ge=0)
+    detail: str
+
+
+class TradeScore(_Frozen):
+    """The parametric pre-trade evaluation (ADR 0015). Deterministic: same inputs, same score."""
+
+    total: Decimal = Field(ge=0, le=100)
+    min_score: Decimal
+    passed: bool
+    components: tuple[ScoreComponent, ...]
+    hard_fails: tuple[str, ...]
+    reward_risk: Decimal  # (target - 2 x spread) / (stop + 2 x spread)
+    atr_pct: Decimal | None  # average daily range, % of price
+    stop_atr: Decimal | None  # stop distance in ATRs
+    extension_atr: Decimal | None  # price above its 20-day average, in ATRs
+    expected_value_pct: Decimal | None  # mean return of past closed trades, once enough
+    history_trades: int
+
+    @property
+    def summary(self) -> str:
+        return f"{self.total}/100 (needs {self.min_score.normalize():f})"
+
+
 class RiskCheck(_Frozen):
     name: str
     passed: bool
@@ -317,6 +344,7 @@ class RiskDecision(_Frozen):
     checks: tuple[RiskCheck, ...]
     plan: OrderPlan | None
     evaluated_at: datetime
+    score: TradeScore | None = None  # the parametric evaluation (ADR 0015), when it ran
 
     @property
     def failed_checks(self) -> tuple[RiskCheck, ...]:

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -42,6 +43,7 @@ from trading_agent.mcp_server.server import build_server
 from trading_agent.mcp_server.tools import ResearchTools
 from trading_agent.orchestration.cycle import CycleServices
 from trading_agent.reporting.delivery import post_webhook, save_report
+from trading_agent.reporting.performance import trades_from_orders
 from trading_agent.reporting.report import ReportBuilder, render_markdown
 from trading_agent.risk.engine import RiskEngine
 from trading_agent.settings.loader import ConfigError
@@ -171,7 +173,36 @@ class Container:
             self.build_market_data(),
             self.config,
             live_trading_confirmed=self.secrets.live_trading_confirmed,
+            history=self.trade_history,
         )
+
+    def trade_history(self) -> list[Decimal]:
+        """Returns (%) of the daily system's closed trades over the last year, oldest first,
+        for the trade score's history part (ADR 0015). Empty without a database."""
+        zone = ZoneInfo(self.config.schedule.timezone)
+        end = datetime.now(zone) + timedelta(days=1)
+        orders = self.build_audit_store().orders_between(end - timedelta(days=366), end)
+        return [
+            t.return_pct
+            for t in trades_from_orders(orders, zone)
+            if t.closed and t.return_pct is not None
+        ]
+
+    def slot_capacity(self) -> str | None:
+        """Why an extra trade slot cannot trade now, checked before spending LLM tokens."""
+        if self.config.kill_switch:
+            return "kill switch is on"
+        risk = self.config.risk
+        broker = self.build_broker()
+        positions = broker.get_positions()
+        if len(positions) >= risk.max_open_positions:
+            return f"{len(positions)} position(s) open (max {risk.max_open_positions})"
+        zone = ZoneInfo(self.config.schedule.timezone)
+        day_start = datetime.combine(datetime.now(zone).date(), time(0), tzinfo=zone)
+        bought = broker.count_buy_orders_since(day_start)
+        if bought >= risk.max_trades_per_day:
+            return f"{bought} buy order(s) today (max {risk.max_trades_per_day})"
+        return None
 
     def build_order_port(self) -> OrderExecutionPort:
         self._require("broker", BROKER_SECRET_FIELDS[self.config.broker.provider])
@@ -239,8 +270,8 @@ class Container:
                 live_checks=self.live_checks if self.config.is_live else None,
             )
 
-        def analyze(run_id: str) -> Any:
-            return anyio.run(self.build_analyst().run, run_id)
+        def analyze(run_id: str, context: str | None = None) -> Any:
+            return anyio.run(self.build_analyst().run, run_id, context)
 
         def critique(
             run_id: str, proposal: TradeProposal, calls: list[ToolCallRecord]
@@ -259,6 +290,7 @@ class Container:
             report=self.publish_report,
             critique=critique,
             reflect=self.learn if self.config.learning.enabled else None,
+            capacity=self.slot_capacity,
         )
 
     def publish_report(self, day: date, *, send: bool = True) -> str:

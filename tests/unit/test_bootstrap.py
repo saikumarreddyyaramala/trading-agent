@@ -414,3 +414,101 @@ def test_cost_report_from_the_container(config_dir: Path, tmp_path: Path) -> Non
     report = container.cost_report(days=3)
     assert len(report.days) == 3
     assert report.total.calls == 0
+
+
+# ---------- Trade slots and score history (ADR 0015) ----------
+
+
+def _paper3(config_dir: Path) -> None:
+    (config_dir / "paper.yaml").write_text(
+        "environment: paper\nbroker:\n  paper: true\n"
+        "risk:\n  max_trades_per_day: 3\n  max_open_positions: 3\n",
+        encoding="utf-8",
+    )
+
+
+def test_slot_capacity(config_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from tests.conftest import make_position
+
+    _paper3(config_dir)
+    container = Container(config=load_config("paper", config_dir), secrets=make_secrets())
+    broker = FakeBroker()
+    monkeypatch.setattr(Container, "build_broker", lambda self: broker)
+    assert container.slot_capacity() is None
+
+    broker.orders_today = 3
+    assert container.slot_capacity() == "3 buy order(s) today (max 3)"
+
+    broker.orders_today = 1
+    broker.positions = tuple(make_position(s) for s in ("A", "B", "C"))
+    assert container.slot_capacity() == "3 position(s) open (max 3)"
+
+
+def test_slot_capacity_respects_the_kill_switch(config_dir: Path) -> None:
+    (config_dir / "paper.yaml").write_text(
+        "environment: paper\nbroker:\n  paper: true\nkill_switch: true\n", encoding="utf-8"
+    )
+    container = Container(config=load_config("paper", config_dir), secrets=make_secrets())
+    assert container.slot_capacity() == "kill switch is on"
+
+
+def test_trade_history_comes_from_closed_system_trades(config_dir: Path, tmp_path: Path) -> None:
+    from datetime import UTC, datetime, timedelta
+    from decimal import Decimal
+
+    from trading_agent.domain.models import BrokerOrder
+
+    secrets = make_secrets(database_url=_learning_db(tmp_path))
+    container = Container(config=load_config("paper", config_dir), secrets=secrets)
+    assert container.trade_history() == []
+
+    store = container.build_audit_store()
+    run = "daily-20261015"
+    store.start_run(run, "daily")
+    when = datetime.now(UTC) - timedelta(days=1)
+
+    def order(cid: str, side: str, price: str, minutes: int) -> BrokerOrder:
+        return BrokerOrder(
+            id=f"id-{cid}",
+            client_order_id=cid,
+            symbol="AAPL",
+            side=side,  # type: ignore[arg-type]
+            order_type="limit" if side == "buy" else "market",
+            status="filled",
+            quantity=Decimal("1"),
+            filled_quantity=Decimal("1"),
+            filled_avg_price=Decimal(price),
+            submitted_at=when + timedelta(minutes=minutes),
+        )
+
+    store.record_orders(
+        run, [order(f"ta-{run}-entry", "buy", "100", 0), order("x", "sell", "102", 30)]
+    )
+    assert container.trade_history() == [Decimal("2.00")]
+
+
+def test_risk_engine_gets_the_history(config_dir: Path) -> None:
+    container = Container(config=load_config("paper", config_dir), secrets=make_secrets())
+    engine = container.build_risk_engine()
+    assert engine._history is not None
+    assert engine._history() == []  # no database: no history, which scores as neutral
+
+
+def test_cycle_services_pass_context_and_capacity(
+    config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: list[tuple[str | None, str | None]] = []
+
+    async def fake_run(
+        self: AnalystAgent, run_id: str | None = None, context: str | None = None
+    ) -> str:
+        seen.append((run_id, context))
+        return "result"
+
+    monkeypatch.setattr(AnalystAgent, "run", fake_run)
+    monkeypatch.setattr(Container, "build_analyst", lambda self: AnalystAgent.__new__(AnalystAgent))
+    container = Container(config=load_config("paper", config_dir), secrets=make_secrets())
+    services = container.build_cycle_services()
+    assert services.analyze("daily-1-2", "slot 2") == "result"
+    assert seen == [("daily-1-2", "slot 2")]
+    assert services.capacity == container.slot_capacity

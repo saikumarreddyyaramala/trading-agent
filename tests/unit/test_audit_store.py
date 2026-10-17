@@ -690,3 +690,36 @@ def test_null_store_has_no_llm_calls() -> None:
     store = NullAuditStore()
     store.record_llm_call(_llm_call(), None)
     assert store.llm_calls_between(NOW, NOW + timedelta(days=1)) == []
+
+
+# ---------- Trade score (ADR 0015) ----------
+
+
+def test_risk_decisions_keep_their_score(db_engine: sa.Engine) -> None:
+    from trading_agent.domain.models import ScoreComponent, TradeScore
+
+    score = TradeScore(
+        total=Decimal("72.5"),
+        min_score=Decimal(60),
+        passed=True,
+        components=(
+            ScoreComponent(name="Trend", value=Decimal("1.00"), weight=Decimal(25), detail="up"),
+        ),
+        hard_fails=(),
+        reward_risk=Decimal("1.88"),
+        atr_pct=Decimal("2.00"),
+        stop_atr=Decimal("2.50"),
+        extension_atr=Decimal("0.53"),
+        expected_value_pct=None,
+        history_trades=3,
+    )
+    store = _store(db_engine)
+    store.start_run("r1", "daily")
+    store.record_risk_decision("r1", _decision().model_copy(update={"score": score}))
+    store.record_risk_decision("r1", _decision(approved=False))  # no score: NULL
+    run = store.get_run("r1")
+    assert run is not None
+    scored, unscored = run["risk_decisions"]
+    assert scored["score"]["total"] == "72.5"
+    assert scored["score"]["components"][0]["name"] == "Trend"
+    assert unscored["score"] is None

@@ -21,11 +21,13 @@ from trading_agent.domain.models import (
     Quote,
     RiskCheck,
     RiskDecision,
+    ScoreComponent,
     SymbolData,
     ToolCall,
     ToolResult,
     ToolSpec,
     TradeProposal,
+    TradeScore,
 )
 from trading_agent.domain.ports import (
     BrokerPort,
@@ -61,9 +63,11 @@ __all__ = [
     "Quote",
     "RiskCheck",
     "RiskDecision",
+    "ScoreComponent",
     "SymbolData",
     "ToolCall",
     "ToolResult",
     "ToolSpec",
     "TradeProposal",
+    "TradeScore",
 ]

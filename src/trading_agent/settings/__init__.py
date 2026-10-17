@@ -22,6 +22,7 @@ from trading_agent.settings.models import (
     ReportingConfig,
     RiskConfig,
     ScheduleConfig,
+    ScoringConfig,
     StorageConfig,
     ToolsConfig,
 )
@@ -45,6 +46,7 @@ __all__ = [
     "ReportingConfig",
     "RiskConfig",
     "ScheduleConfig",
+    "ScoringConfig",
     "Secrets",
     "StorageConfig",
     "ToolsConfig",

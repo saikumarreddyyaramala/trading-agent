@@ -17,6 +17,7 @@ from trading_agent.reporting.performance import (
     intraday_return_pct,
     trades_from_orders,
 )
+from trading_agent.reporting.slots import slot_runs, summarize_slot
 from trading_agent.settings.models import AppConfig
 from trading_agent.storage.store import AuditStore, NewLessonRow
 
@@ -63,7 +64,7 @@ class LearningService:
             "symbol": record["analysis"]["symbol"],
             "decision": record["analysis"]["decision"],
             "critic": (record["critic"] or {}).get("status"),
-            "trade_return_pct": (record["trade"] or {}).get("return_pct"),
+            "trade_returns_pct": [t["return_pct"] for t in record["trades"]],
             "spy_pct": record["benchmark_spy_open_to_close_pct"],
         }
         added = self._store.record_lessons(
@@ -103,7 +104,7 @@ class LearningService:
         trades = trades_from_orders(
             self._store.orders_between(start, start + timedelta(days=1)), self._zone
         )
-        trade = next((t for t in trades if t.day == day), None)
+        today = [t for t in trades if t.day == day]
 
         symbol = proposal.get("symbol")
         benchmark = self._config.reporting.benchmark_symbol
@@ -165,16 +166,23 @@ class LearningService:
             "risk": None
             if not decision
             else {"approved": decision["approved"], "failed_checks": decision["failed_checks"]},
-            "trade": None
-            if trade is None
-            else {
-                "symbol": trade.symbol,
-                "entry_price": str(trade.entry_price),
-                "exit_price": None if trade.exit_price is None else str(trade.exit_price),
-                "return_pct": None if trade.return_pct is None else str(trade.return_pct),
-                "pnl_usd": None if trade.pnl_usd is None else str(trade.pnl_usd),
-                "exit_via": trade.exit_via,
-            },
+            "trades": [
+                {
+                    "symbol": trade.symbol,
+                    "run_id": trade.run_id,
+                    "entry_price": str(trade.entry_price),
+                    "exit_price": None if trade.exit_price is None else str(trade.exit_price),
+                    "return_pct": None if trade.return_pct is None else str(trade.return_pct),
+                    "pnl_usd": None if trade.pnl_usd is None else str(trade.pnl_usd),
+                    "exit_via": trade.exit_via,
+                }
+                for trade in today
+            ],
+            # Extra trade slots (ADR 0015): what each later analysis did and why.
+            "slots": [
+                summarize_slot(slot).model_dump(mode="json")
+                for slot in slot_runs(self._store, run["run"]["run_id"])
+            ],
             "benchmark_spy_open_to_close_pct": None if spy is None else str(spy),
             "stopped_idea_simulation": stopped,
             "position_events": [f"{e['action']}: {e['detail']}" for e in run["position_events"]],

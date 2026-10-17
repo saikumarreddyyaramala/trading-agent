@@ -3,3 +3,9 @@ environment: paper
 
 broker:
   paper: true
+
+# Paper gathers data faster: up to 3 trades a day, held at the same time (ADR 0015).
+# Live stays at 1 trade and 1 position; the config refuses anything more for live.
+risk:
+  max_trades_per_day: 3
+  max_open_positions: 3

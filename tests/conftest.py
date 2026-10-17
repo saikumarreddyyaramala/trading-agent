@@ -231,6 +231,13 @@ def make_bars(
     return tuple(bars)
 
 
+def make_trend_bars(symbol: str = "AAPL", n: int = 30, volume: int = 2_000_000) -> tuple[Bar, ...]:
+    """`n` daily bars in a gentle uptrend ending at $100 (ATR ~2%): scores well (ADR 0015)."""
+    return make_bars(
+        symbol, [str(Decimal("97.1") + Decimal("0.1") * i) for i in range(n)], volume=volume
+    )
+
+
 def make_asset(
     symbol: str = "AAPL",
     *,

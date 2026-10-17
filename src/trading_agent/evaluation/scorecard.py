@@ -30,6 +30,7 @@ from trading_agent.reporting.performance import (
     intraday_return_pct,
     trades_from_orders,
 )
+from trading_agent.reporting.slots import slot_runs
 from trading_agent.settings.models import AppConfig
 from trading_agent.storage.store import AuditError, AuditStore
 
@@ -171,6 +172,13 @@ class ScorecardBuilder:
                 break
             if report is not None:
                 reports.append(report)
+        runs = list(reports)  # every run, extra trade slots included (ADR 0015)
+        for report in reports:
+            try:
+                runs += slot_runs(self._store, report["run"]["run_id"])
+            except AuditError as exc:
+                warnings.append(f"trade slots unavailable: {exc}")
+                break
 
         window_start = datetime.combine(start, time(0), tzinfo=self._zone)
         window_end = datetime.combine(end + timedelta(days=1), time(0), tzinfo=self._zone)
@@ -181,14 +189,14 @@ class ScorecardBuilder:
             warnings.append(f"orders unavailable: {exc}")
         trades = [t for t in trades_from_orders(orders, self._zone) if t.closed]
 
-        stopped = self._stopped_proposals(reports)
+        stopped = self._stopped_proposals(runs)
         bars = self._bars(
             {self._config.reporting.benchmark_symbol} | {s for s, _, _, _ in stopped},
             start,
             warnings,
         )
 
-        funnel = self._funnel(days, reports, len(trades))
+        funnel = self._funnel(days, reports, runs, len(trades))
         performance = self._performance(trades, bars)
         counterfactuals = self._counterfactuals(stopped, bars)
         try:
@@ -200,7 +208,7 @@ class ScorecardBuilder:
         except AuditError as exc:
             ledger = None
             warnings.append(f"cost ledger unavailable: {exc}")
-        cost = self._cost(reports, ledger, funnel.cycle_days)
+        cost = self._cost(runs, ledger, funnel.cycle_days)
         criteria = self._criteria(funnel, performance, cost)
         decision: Literal["GO", "NO-GO"] = (
             "GO" if criteria and all(c.passed is True for c in criteria) else "NO-GO"
@@ -249,7 +257,7 @@ class ScorecardBuilder:
             ):
                 continue
             day = datetime.strptime(
-                report["run"]["run_id"].removeprefix(SYSTEM_RUN_PREFIX), "%Y%m%d"
+                report["run"]["run_id"].removeprefix(SYSTEM_RUN_PREFIX)[:8], "%Y%m%d"
             ).date()
             symbol, price = proposal["symbol"], Decimal(str(proposal["reference_price"]))
             critique = report.get("critique")
@@ -260,14 +268,21 @@ class ScorecardBuilder:
         return stopped
 
     @staticmethod
-    def _funnel(days: list[date], reports: list[dict[str, Any]], closed: int) -> Funnel:
-        statuses: Counter[str] = Counter()
+    def _funnel(
+        days: list[date],
+        reports: list[dict[str, Any]],
+        runs: list[dict[str, Any]],
+        closed: int,
+    ) -> Funnel:
+        """Day outcomes come from the daily runs; every other count includes the slots."""
+        statuses: Counter[str] = Counter(
+            report["run"]["status"] or "incomplete" for report in reports
+        )
         critic: Counter[str] = Counter()
         entries: Counter[str] = Counter()
         failed_checks: Counter[str] = Counter()
         analyses = buys = no_trades = failures = approved = rejected = 0
-        for report in reports:
-            statuses[report["run"]["status"] or "incomplete"] += 1
+        for report in runs:
             analysis = report["analysis"]
             if analysis:
                 analyses += 1

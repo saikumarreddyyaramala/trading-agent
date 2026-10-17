@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo
 from trading_agent.domain.models import Lesson
 from trading_agent.settings.models import AppConfig
 
-PROMPT_VERSION = "analyst-2026-10-17.1"
+PROMPT_VERSION = "analyst-2026-10-17.2"
 
 _SYSTEM = """\
 You are the research analyst of an automated US stock trading system.
@@ -77,12 +77,13 @@ def system_prompt(config: AppConfig, lessons: Sequence[Lesson] = ()) -> str:
     return prompt
 
 
-def task_prompt(now: datetime, timezone: str) -> str:
+def task_prompt(now: datetime, timezone: str, context: str | None = None) -> str:
     local = now.astimezone(ZoneInfo(timezone))
-    return (
+    prompt = (
         f"It is {local:%A %Y-%m-%d %H:%M} ({timezone}). Research today's market and give your "
         "proposal for one intraday long trade, or no trade."
     )
+    return f"{prompt}\n\n{context}" if context else prompt
 
 
 def repair_prompt(problems: list[str]) -> str:

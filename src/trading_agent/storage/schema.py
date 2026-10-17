@@ -140,6 +140,8 @@ risk_decisions = sa.Table(
     sa.Column("failed_checks", JSONType, nullable=False),
     sa.Column("checks", JSONType, nullable=False),
     sa.Column("plan", JSONType),
+    # The parametric trade score, when it ran (added in migration 0006).
+    sa.Column("score", JSONType),
 )
 
 orders = sa.Table(

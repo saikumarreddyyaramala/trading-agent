@@ -4,6 +4,11 @@
     -> manage every minute -> close (force_close) -> reconcile (report)
     -> reflect (self-learning, ADR 0013) -> report
 
+On paper, up to two more analysis-and-entry slots run during the session
+(`schedule.extra_analyses`, capped by `risk.max_trades_per_day`; ADR 0015). Each
+slot is its own run, `daily-YYYYMMDD-2` and `-3`, with its own analysis, critique,
+risk check, and entry. Positions are managed between slots.
+
 Rules:
 - One run id per day (`daily-YYYYMMDD`). Every step is recorded once; a restarted process
   skips finished steps. Even without a database a restart cannot double-buy: entry order
@@ -65,7 +70,8 @@ class CycleServices:
     """What the cycle needs, as plain callables, so each piece can be faked in tests."""
 
     health_check: Callable[[], list[CheckResult]]
-    analyze: Callable[[str], AnalystResult]
+    # (run id, context for the analyst or None) -> the analysis
+    analyze: Callable[[str, str | None], AnalystResult]
     evaluate: Callable[[TradeProposal], RiskDecision]
     executor: ExecutorLike
     market_clock: Callable[[], MarketClock]
@@ -79,6 +85,8 @@ class CycleServices:
     )
     # Reviews the finished day and updates the analyst's lessons; returns a short description.
     reflect: Callable[[date], str] | None = None
+    # A reason to skip an extra slot before spending tokens (positions full, ...).
+    capacity: Callable[[], str | None] | None = None
 
 
 @dataclass(frozen=True)
@@ -94,6 +102,7 @@ class Session:
     report: datetime
     market_close: datetime
     early_close: bool
+    slots: tuple[datetime, ...] = ()  # extra analysis-and-entry slots (ADR 0015)
 
 
 class DayResult(BaseModel):
@@ -122,9 +131,9 @@ class DailyCycle:
         self._clock = clock or (lambda: datetime.now(UTC))
         self._sleep = sleep or _time.sleep
         self._log = logger or get_logger(__name__)
-        # Outcome of each step of the day in progress, whether or not a database is present.
-        self._steps: dict[str, str] = {}
-        self._details: dict[str, str] = {}
+        # Outcome of each step, per run, whether or not a database is present.
+        self._steps: dict[str, dict[str, str]] = {}
+        self._details: dict[str, dict[str, str]] = {}
 
     # ---------- Time ----------
 
@@ -163,6 +172,8 @@ class DailyCycle:
         trade_end = min(
             self._at(day, schedule.trade_window_end), force_close - timedelta(minutes=20)
         )
+        extra = schedule.extra_analyses[: max(self._config.risk.max_trades_per_day - 1, 0)]
+        slots = tuple(t for t in (self._at(day, a) for a in extra) if t < trade_end)
         return Session(
             day=day,
             preflight=self._at(day, schedule.data_collection),
@@ -173,6 +184,7 @@ class DailyCycle:
             report=max(self._at(day, schedule.report), closes + timedelta(minutes=5)),
             market_close=closes,
             early_close=force_close < self._at(day, schedule.force_close),
+            slots=slots,
         )
 
     # ---------- Recording ----------
@@ -185,8 +197,8 @@ class DailyCycle:
             return False
 
     def _step(self, run_id: str, step: str, status: str, detail: str, started: datetime) -> None:
-        self._steps[step] = status
-        self._details[step] = detail
+        self._steps.setdefault(run_id, {})[step] = status
+        self._details.setdefault(run_id, {})[step] = detail
         self._log.info("cycle.step", run_id=run_id, step=step, status=status, detail=detail)
         self._record(f"step {step}", lambda s: s.record_step(run_id, step, status, detail, started))
 
@@ -221,8 +233,9 @@ class DailyCycle:
             done = dict(store.completed_steps(run_id))
         except AuditError:
             done = {}
-        self._steps = done  # steps finished before a restart, then this run's as they finish
-        self._details = {}
+        # Steps finished before a restart, then this run's as they finish.
+        self._steps = {run_id: done}
+        self._details = {run_id: {}}
         audit_ok = self._record("run", lambda s: s.start_run(run_id, "daily"))
         if not audit_ok and self._services.recorder.required:
             self._log.error("cycle.audit_unavailable", run_id=run_id)
@@ -235,27 +248,41 @@ class DailyCycle:
         proposal, calls = self._analysis(run_id, session, done, halted)
         proposal = self._critique(run_id, done, proposal, calls)
         traded = self._entry(run_id, session, done, halted, proposal)
+        bought = [proposal.symbol] if traded and proposal and proposal.symbol else []
+        notes = []
+        for number, slot_at in enumerate(session.slots, start=2):
+            self._manage_until(run_id, session, until=slot_at)
+            note = self._slot(run_id, number, slot_at, session, done, halted, bought)
+            if note:
+                notes.append(note)
         self._manage_until(run_id, session)
         closed_ok = self._close(run_id, session, done)
         self._reconcile(run_id, session, done)
 
-        steps = dict(self._steps)
-        if not closed_ok:
-            status, summary = "error", "positions may still be open after the force-close"
-        elif traded is not None:
-            status, summary = "traded", traded
+        steps = dict(self._steps[run_id])
+        slot_entered = any(v == "entered" for k, v in steps.items() if k.startswith("slot"))
+        if traded is not None:
+            first = traded
         elif halted:
-            status, summary = "halted", "pre-flight failed or audit unavailable: no new trades"
+            first = "pre-flight failed or audit unavailable: no new trades"
         else:
             entry = steps.get("entry", "no entry")
-            detail = self._details.get("entry")
-            status, summary = "no_trade", f"{entry}: {detail}" if detail else entry
+            detail = self._details[run_id].get("entry")
+            first = f"{entry}: {detail}" if detail else entry
+        if not closed_ok:
+            status, summary = "error", "positions may still be open after the force-close"
+        elif traded is not None or slot_entered:
+            status, summary = "traded", "; ".join([first, *notes])
+        elif halted:
+            status, summary = "halted", first
+        else:
+            status, summary = "no_trade", "; ".join([first, *notes])
         self._record("run result", lambda s: s.finish_run(run_id, status, summary))
         self._reflect(run_id, session, done)  # never affects the day's trades or result
         self._report(run_id, session, done)  # after the result, so the report includes it
         self._log.info("cycle.day_finished", run_id=run_id, status=status, summary=summary)
         return DayResult(
-            run_id=run_id, day=day, status=status, summary=summary, steps=dict(self._steps)
+            run_id=run_id, day=day, status=status, summary=summary, steps=dict(self._steps[run_id])
         )
 
     def _preflight(self, run_id: str, session: Session, done: dict[str, str]) -> bool:
@@ -279,7 +306,14 @@ class DailyCycle:
         return not ok
 
     def _analysis(
-        self, run_id: str, session: Session, done: dict[str, str], halted: bool
+        self,
+        run_id: str,
+        session: Session,
+        done: dict[str, str],
+        halted: bool,
+        *,
+        at: datetime | None = None,
+        context: str | None = None,
     ) -> tuple[TradeProposal | None, list[ToolCallRecord]]:
         """The verified proposal, if any, and the tool calls that produced its evidence."""
         if "analysis" in done:
@@ -295,10 +329,10 @@ class DailyCycle:
         if self._now() >= session.trade_end:
             self._step(run_id, "analysis", "skipped", "too late: trade window over", started)
             return None, []
-        self._wait_until(session.analysis, "analysis")
+        self._wait_until(at or session.analysis, "analysis")
         started = self._now()
         try:
-            result = self._services.analyze(run_id)
+            result = self._services.analyze(run_id, context)
         except Exception as exc:
             self._step(run_id, "analysis", "error", str(exc), started)
             return None, []
@@ -356,7 +390,7 @@ class DailyCycle:
         if proposal is None:
             reason = (
                 "the critic did not approve the proposal"
-                if self._steps.get("critique") in ("vetoed", "failed", "error")
+                if self._steps.get(run_id, {}).get("critique") in ("vetoed", "failed", "error")
                 else "no verified proposal"
             )
             self._step(run_id, "entry", "skipped", reason, started)
@@ -392,11 +426,13 @@ class DailyCycle:
             return f"entered {entry.filled_quantity} {entry.symbol} at ${entry.avg_fill_price}"
         return None
 
-    def _manage_until(self, run_id: str, session: Session) -> None:
-        """Manage open positions until the force-close. Stops early once flat for good."""
+    def _manage_until(self, run_id: str, session: Session, until: datetime | None = None) -> None:
+        """Manage open positions until `until` (default: the force-close). Stops early once
+        flat: new entries happen only in the entry steps."""
         interval = self._config.orchestration.manage_interval_seconds
-        self._wait_until(min(session.trade_start, session.force_close), "manage")
-        while self._now() < session.force_close:
+        end = min(until or session.force_close, session.force_close)
+        self._wait_until(min(session.trade_start, end), "manage")
+        while self._now() < end:
             try:
                 results = self._services.executor.manage(session.force_close.time())
             except Exception as exc:
@@ -405,8 +441,73 @@ class DailyCycle:
             self._record_manage(run_id, results)
             if results and all(r.action == "flat" for r in results):
                 break  # entries happen only in the entry step, which is over: nothing to manage
-            remaining = (session.force_close - self._now()).total_seconds()
+            remaining = (end - self._now()).total_seconds()
             self._sleep(max(min(interval, remaining), 0))
+
+    def _slot(
+        self,
+        run_id: str,
+        number: int,
+        slot_at: datetime,
+        session: Session,
+        done: dict[str, str],
+        halted: bool,
+        bought: list[str],
+    ) -> str | None:
+        """One extra analysis-and-entry slot, as its own run. Returns a note for the summary."""
+        step = f"slot{number}"
+        if step in done:
+            return None
+        self._wait_until(slot_at, step)
+        started = self._now()
+        reason = None
+        if halted:
+            reason = "trading halted"
+        elif self._now() >= session.trade_end:
+            reason = "too late: trade window over"
+        elif self._services.capacity is not None:
+            try:
+                reason = self._services.capacity()
+            except Exception as exc:
+                reason = f"capacity check failed: {exc}"
+        slot_run = f"{run_id}-{number}"
+        if reason is None:
+            audit_ok = self._record("run", lambda s: s.start_run(slot_run, "daily"))
+            if not audit_ok and self._services.recorder.required:
+                reason = "audit store unavailable"
+        if reason:
+            self._step(run_id, step, "skipped", reason, started)
+            return None
+
+        try:
+            slot_done = dict(self._services.recorder.store.completed_steps(slot_run))
+        except AuditError:
+            slot_done = {}
+        self._steps[slot_run] = slot_done
+        self._details[slot_run] = {}
+        total = len(session.slots) + 1
+        context = (
+            f"This is trade slot {number} of {total} today. Already bought today: "
+            f"{', '.join(bought) or 'nothing yet'} (positions may still be open). Propose a "
+            "different symbol, or no_trade."
+        )
+        proposal, calls = self._analysis(
+            slot_run, session, slot_done, False, at=slot_at, context=context
+        )
+        proposal = self._critique(slot_run, slot_done, proposal, calls)
+        traded = self._entry(slot_run, session, slot_done, False, proposal)
+        if traded is not None:
+            status, summary = "entered", traded
+            if proposal is not None and proposal.symbol:
+                bought.append(proposal.symbol)
+        else:
+            entry = self._steps[slot_run].get("entry", "no entry")
+            detail = self._details[slot_run].get("entry")
+            status, summary = "no_trade", f"{entry}: {detail}" if detail else entry
+        outcome = "traded" if traded is not None else "no_trade"
+        self._record("slot result", lambda s: s.finish_run(slot_run, outcome, summary))
+        self._step(run_id, step, status, summary, started)
+        return f"slot {number}: {summary}"
 
     def _close(self, run_id: str, session: Session, done: dict[str, str]) -> bool:
         """Force-close and verify the account is flat. Returns False if it may not be."""

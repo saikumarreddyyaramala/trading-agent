@@ -10,7 +10,7 @@ Principles:
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, time
 from decimal import ROUND_DOWN, Decimal
@@ -29,10 +29,12 @@ from trading_agent.domain.models import (
     RiskCheck,
     RiskDecision,
     TradeProposal,
+    TradeScore,
 )
 from trading_agent.domain.ports import BrokerPort, MarketDataPort
 from trading_agent.observability.logging import get_logger
 from trading_agent.risk.eligibility import asset_issues, liquidity_issues, price_issues
+from trading_agent.risk.scoring import MIN_BARS, score_trade
 from trading_agent.settings.models import AppConfig
 
 CENT = Decimal("0.01")
@@ -66,7 +68,11 @@ class RiskEngine:
         live_trading_confirmed: bool,
         clock: Callable[[], datetime] | None = None,
         logger: Any = None,
+        history: Callable[[], Sequence[Decimal]] | None = None,
     ) -> None:
+        """`history` returns the returns (%) of the system's past closed trades, oldest
+        first, for the trade score. Unavailable history is neutral, never a rejection."""
+        self._history = history
         self._broker = broker
         self._market_data = market_data
         self._config = config
@@ -133,8 +139,9 @@ class RiskEngine:
             bars = (
                 self._fetch(
                     "daily bars",
+                    # Enough for both the liquidity average and the trade score.
                     lambda: self._market_data.get_daily_bars(
-                        [symbol], days=risk.volume_lookback_days
+                        [symbol], days=max(risk.volume_lookback_days, MIN_BARS + 9)
                     ).get(symbol, ()),
                     errors,
                 )
@@ -146,7 +153,7 @@ class RiskEngine:
 
         # ---- Account state ----
         self._check_trades_today(checks, orders_today, errors)
-        self._check_positions(checks, positions, errors)
+        self._check_positions(checks, positions, symbol, errors)
         self._check_account(checks, account, errors)
 
         # ---- The instrument ----
@@ -155,6 +162,9 @@ class RiskEngine:
                 checks.add(name, ["no valid symbol to check"], "")
         else:
             self._check_instrument(checks, symbol, proposal, asset, quote, bars, now, errors)
+
+        # ---- The parametric trade score (ADR 0015) ----
+        score = self._check_score(checks, proposal, quote, bars)
 
         # ---- Sizing (only meaningful when everything else passed) ----
         plan: OrderPlan | None = None
@@ -165,7 +175,7 @@ class RiskEngine:
             and quote is not None
             and all(c.passed for c in checks.items)
         ):
-            plan = self._size(checks, symbol, proposal, account, asset, quote)
+            plan = self._size(checks, symbol, proposal, account, asset, quote, positions)
         else:
             checks.add("Position size", ["not sized: earlier checks failed"], "")
 
@@ -176,6 +186,7 @@ class RiskEngine:
             checks=tuple(checks.items),
             plan=plan if approved else None,
             evaluated_at=now,
+            score=score,
         )
         self._log.info(
             "risk.decision",
@@ -183,6 +194,7 @@ class RiskEngine:
             symbol=symbol,
             failed=[c.name for c in decision.failed_checks],
             notional_usd=str(plan.notional_usd) if plan and approved else None,
+            score=None if score is None else str(score.total),
         )
         return decision
 
@@ -227,16 +239,28 @@ class RiskEngine:
         )
 
     def _check_positions(
-        self, checks: _Checks, positions: tuple[Position, ...] | None, errors: dict[str, str]
+        self,
+        checks: _Checks,
+        positions: tuple[Position, ...] | None,
+        symbol: str | None,
+        errors: dict[str, str],
     ) -> None:
         if positions is None:
             checks.add("Open positions", [errors["positions"]], "")
             return
+        limit = self._risk.max_open_positions
         held = ", ".join(p.symbol for p in positions)
+        issues = []
+        if symbol is not None and any(p.symbol == symbol for p in positions):
+            issues.append(f"already holding {symbol}: never add to an open position")
+        if len(positions) >= limit:
+            issues.append(
+                f"already holding {held}: {len(positions)} open; at most {limit} at a time"
+            )
         checks.add(
             "Open positions",
-            [f"already holding {held}; one position at a time"] if positions else [],
-            "none",
+            issues,
+            f"{len(positions)} of {limit} open ({held})" if positions else "none",
         )
 
     def _check_account(
@@ -307,12 +331,52 @@ class RiskEngine:
         if not bars:
             checks.add("Liquidity", [errors.get("daily bars", f"no daily bars for {symbol}")], "")
         else:
-            average = sum(b.volume for b in bars) // len(bars)
+            recent = bars[-risk.volume_lookback_days :]
+            average = sum(b.volume for b in recent) // len(recent)
             checks.add(
                 "Liquidity",
                 liquidity_issues(average, risk),
-                f"{average:,} shares/day over {len(bars)} days",
+                f"{average:,} shares/day over {len(recent)} days",
             )
+
+    def _check_score(
+        self,
+        checks: _Checks,
+        proposal: TradeProposal,
+        quote: Quote | None,
+        bars: tuple[Bar, ...],
+    ) -> TradeScore | None:
+        scoring = self._config.scoring
+        if not scoring.enabled:
+            checks.add("Trade score", [], "disabled (scoring.enabled: false)")
+            return None
+        if quote is None or proposal.decision != "buy":
+            checks.add("Trade score", ["no quote to score"], "")
+            return None
+        history: Sequence[Decimal] | None
+        try:
+            history = list(self._history()) if self._history else []
+        except Exception as exc:
+            self._log.info("risk.history_unavailable", error=str(exc))
+            history = None
+        score = score_trade(
+            price=quote.ask_price,
+            spread_pct=quote.spread_pct,
+            bars=bars,
+            confidence=proposal.confidence,
+            history=history,
+            risk=self._risk,
+            scoring=scoring,
+        )
+        weakest = sorted(score.components, key=lambda c: c.value)[:2]
+        detail = f"{score.summary}; weakest: " + "; ".join(
+            f"{c.name.lower()} {c.value} ({c.detail})" for c in weakest
+        )
+        problems = list(score.hard_fails)
+        if not problems and not score.passed:
+            problems.append(f"{score.summary}; weakest: " + detail.split("; weakest: ")[1])
+        checks.add("Trade score", problems, detail)
+        return score
 
     def _size(
         self,
@@ -322,6 +386,7 @@ class RiskEngine:
         account: AccountSnapshot,
         asset: Asset,
         quote: Quote,
+        positions: tuple[Position, ...] | None = None,
     ) -> OrderPlan | None:
         risk = self._risk
         price = quote.ask_price
@@ -348,10 +413,15 @@ class RiskEngine:
         elif notional < MIN_NOTIONAL_USD:
             issues.append(f"order value ${notional} is below the ${MIN_NOTIONAL_USD} minimum")
         worst_loss = _cents_down(quantity * limit_price * risk.stop_loss_pct / 100)
-        if account.equity - worst_loss < risk.account_floor_usd:
+        # Every open position can hit its own stop too: count those losses as well.
+        open_loss = _cents_down(
+            sum((p.market_value for p in positions or ()), Decimal(0)) * risk.stop_loss_pct / 100
+        )
+        if account.equity - worst_loss - open_loss < risk.account_floor_usd:
             issues.append(
-                f"a stop-loss exit could lose ${worst_loss} and breach the "
-                f"${risk.account_floor_usd} equity floor"
+                f"a stop-loss exit could lose ${worst_loss}"
+                + (f" (and open positions could lose ${open_loss})" if open_loss else "")
+                + f" and breach the ${risk.account_floor_usd} equity floor"
             )
         detail = (
             f"{quantity} {symbol} (~${notional}) limit ${limit_price}, "

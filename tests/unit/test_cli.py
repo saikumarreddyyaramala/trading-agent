@@ -20,6 +20,7 @@ from tests.conftest import (
     make_article,
     make_position,
     make_quote,
+    make_trend_bars,
 )
 from trading_agent import __version__, cli
 from trading_agent.agents.analyst import AnalystResult, ToolCallRecord
@@ -340,9 +341,11 @@ def _use_fake_risk(monkeypatch: pytest.MonkeyPatch, broker: FakeBroker) -> list[
     class _Engine:
         def evaluate(self, proposal: TradeProposal) -> RiskDecision:
             seen.append(proposal)
+            market_data = healthy_market_data("AAPL")
+            market_data.bars["AAPL"] = make_trend_bars()  # enough history to score
             return RiskEngine(
                 broker,
-                healthy_market_data("AAPL"),
+                market_data,
                 AppConfig(),
                 live_trading_confirmed=False,
                 clock=lambda: NOW,
@@ -1370,3 +1373,35 @@ def test_costs_needs_a_database(config_dir: Path) -> None:
     result = runner.invoke(cli.app, ["costs", "--config-dir", str(config_dir)])
     assert result.exit_code == 2
     assert "DATABASE_URL is not set" in result.output
+
+
+def test_risk_check_shows_the_score_breakdown(
+    config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _use_fake_risk(monkeypatch, FakeBroker())
+    result = runner.invoke(
+        cli.app, ["risk-check", "AAPL", "--price", "100.05", "--config-dir", str(config_dir)]
+    )
+    # A manual check marks the analyst's confidence as low.
+    assert "Trade score 84.6/100 (needs 60)" in result.output
+    assert (
+        "  Reward/risk          0.88  x20  1.88 after spread (10% target, 5% stop, 0.100% spread)"
+        in result.output
+    )
+    assert (
+        "  History              0.50  x10  0 of 10 closed trades needed: neutral" in result.output
+    )
+
+
+def test_repo_config_trades_three_times_a_day_on_paper_only(config_dir: Path) -> None:
+    from datetime import time
+
+    from trading_agent.settings import load_config
+
+    paper = load_config("paper", config_dir)
+    assert (paper.risk.max_trades_per_day, paper.risk.max_open_positions) == (3, 3)
+    assert paper.schedule.extra_analyses == (time(10, 30), time(12))
+    assert paper.scoring.enabled
+    assert paper.scoring.min_score == 60
+    live = load_config("live", config_dir)
+    assert (live.risk.max_trades_per_day, live.risk.max_open_positions) == (1, 1)

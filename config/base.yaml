@@ -15,9 +15,13 @@ schedule:
   trade_window_end: "15:30"
   force_close: "15:50"
   report: "16:15"
+  # Extra analysis-and-entry slots (ADR 0015). How many run is capped by
+  # risk.max_trades_per_day, so with 1 trade a day (live) they never run.
+  extra_analyses: ["10:30", "12:00"]
 
 risk:
   max_trades_per_day: 1
+  max_open_positions: 1         # positions held at the same time (live: always 1)
   max_position_usd: 50
   stop_loss_pct: 5
   take_profit_pct: 10
@@ -133,3 +137,16 @@ costs:
       monthly_usd: 0
   # New LLM calls are refused once today's priced spend reaches this (needs llm_prices).
   daily_llm_budget_usd: 2.00
+
+# The parametric trade score (ADR 0015): every buy must also earn a minimum score from
+# fixed rules. Hard fails (thin reward after costs, a stop inside normal daily noise, an
+# overextended price, too little price history) reject a trade whatever its score.
+scoring:
+  enabled: true
+  min_score: 60
+  min_reward_risk: 1.5          # (target - 2 x spread) / (stop + 2 x spread)
+  min_stop_atr: 0.75            # the stop must be at least this many daily ranges away
+  max_extension_atr: 3          # reject buying this many ranges above the 20-day average
+  min_history_trades: 10        # own closed trades needed before history counts
+  history_trades: 50
+  weights: {reward_risk: 20, volatility: 20, trend: 25, extension: 15, confidence: 10, history: 10}

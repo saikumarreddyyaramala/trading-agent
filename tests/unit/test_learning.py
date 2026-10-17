@@ -132,8 +132,9 @@ def test_day_record_of_a_traded_day(store: SqlAuditStore) -> None:
     assert record["analysis"]["evidence_claims"] == ["Beat estimates", "Spread 0.02%"]
     assert record["risk"] == {"approved": True, "failed_checks": []}
     assert record["critic"] is None
-    assert record["trade"]["return_pct"] == "2.00"
-    assert record["trade"]["exit_via"] == "exit order"
+    (trade,) = record["trades"]
+    assert trade["return_pct"] == "2.00"
+    assert trade["exit_via"] == "exit order"
     assert record["benchmark_spy_open_to_close_pct"] == "0.50"
     assert record["stopped_idea_simulation"] is None
     assert record["position_events"] == ["force_close: force close at 15:50"]
@@ -151,7 +152,7 @@ def test_day_record_simulates_a_vetoed_idea(store: SqlAuditStore) -> None:
     record = service.day_record(DAY, run)
     assert record["critic"]["status"] == "vetoed"
     assert record["critic"]["reasons"] == ["the catalyst is a week old"]
-    assert record["trade"] is None
+    assert record["trades"] == []
     assert record["stopped_idea_simulation"] == {
         "gate": "critic",
         "simulated_return_pct": "-5.00",
@@ -231,7 +232,7 @@ def test_learn_stores_new_lessons_with_their_evidence(store: SqlAuditStore) -> N
         "symbol": "AAPL",
         "decision": "buy",
         "critic": None,
-        "trade_return_pct": "2.00",
+        "trade_returns_pct": ["2.00"],
         "spy_pct": "0.50",
     }
     assert '"symbol": "AAPL"' in provider.requests[0].messages[0].content
@@ -272,3 +273,20 @@ def test_nothing_to_learn_without_an_analysis(store: SqlAuditStore) -> None:
     store.start_run(RUN, "daily")
     assert service.learn(DAY) == "nothing to learn: no analysis that day"
     assert provider.requests == []
+
+
+def test_day_record_includes_every_slot(store: SqlAuditStore) -> None:
+    from tests.unit.test_report import _record_slot
+
+    _record_trading_day(store)
+    _record_slot(store, 2, "MSFT", "99")
+    service, _ = _service(store, [])
+    run = store.get_run(RUN)
+    assert run is not None
+    record = service.day_record(DAY, run)
+    assert [t["symbol"] for t in record["trades"]] == ["AAPL", "MSFT"]
+    (slot,) = record["slots"]
+    assert slot["run_id"] == f"{RUN}-2"
+    assert slot["symbol"] == "MSFT"
+    assert slot["status"] == "traded"
+    assert slot["score"] == "72.5/100 (needs 60)"

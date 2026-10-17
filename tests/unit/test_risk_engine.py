@@ -14,7 +14,9 @@ from tests.conftest import (
     healthy_market_data,
     make_asset,
     make_bars,
+    make_position,
     make_quote,
+    make_trend_bars,
 )
 from trading_agent.domain.models import (
     Evidence,
@@ -42,6 +44,7 @@ CHECK_NAMES = [
     "Spread",
     "Price vs proposal",
     "Liquidity",
+    "Trade score",
     "Position size",
 ]
 
@@ -69,6 +72,12 @@ class _Log:
         self.events.append((event, kw))
 
 
+def _healthy() -> FakeMarketData:
+    market_data = healthy_market_data("AAPL")
+    market_data.bars["AAPL"] = make_trend_bars()
+    return market_data
+
+
 def _evaluate(
     proposal: TradeProposal | None = None,
     *,
@@ -78,14 +87,16 @@ def _evaluate(
     live_confirmed: bool = False,
     now: datetime = NOW,
     log: _Log | None = None,
+    history: Any = None,
 ) -> RiskDecision:
     engine = RiskEngine(
         broker or FakeBroker(),
-        market_data or healthy_market_data("AAPL"),
+        market_data or _healthy(),
         AppConfig.model_validate(config or {}),
         live_trading_confirmed=live_confirmed,
         clock=lambda: now,
         logger=log or _Log(),
+        history=history,
     )
     return engine.evaluate(proposal or _proposal())
 
@@ -121,7 +132,13 @@ def test_clean_proposal_is_approved_and_sized() -> None:
     )
     event, fields = log.events[-1]
     assert event == "risk.decision"
-    assert fields == {"approved": True, "symbol": "AAPL", "failed": [], "notional_usd": "49.03"}
+    assert fields == {
+        "approved": True,
+        "symbol": "AAPL",
+        "failed": [],
+        "notional_usd": "49.03",
+        "score": "88.6",
+    }
 
 
 def test_trades_are_counted_from_midnight_market_time() -> None:
@@ -134,7 +151,7 @@ def test_trades_are_counted_from_midnight_market_time() -> None:
 def test_details_explain_each_passed_check() -> None:
     decision = _evaluate()
     assert _check(decision, "Trade window").detail == "10:00 within 09:45-15:30"
-    assert _check(decision, "Liquidity").detail == "2,000,000 shares/day over 3 days"
+    assert _check(decision, "Liquidity").detail == "2,000,000 shares/day over 20 days"
     assert _check(decision, "Price vs proposal").detail == "0.05% from $100.05"
 
 
@@ -188,7 +205,7 @@ def test_account_and_schedule_rules(kwargs: dict[str, Any], failed: str, detail:
 
 
 def _data(**changes: Any) -> FakeMarketData:
-    market_data = healthy_market_data("AAPL")
+    market_data = _healthy()
     for key, value in changes.items():
         getattr(market_data, key)["AAPL"] = value
     return market_data
@@ -247,7 +264,7 @@ def test_live_trading_needs_confirmation() -> None:
     ],
 )
 def test_invalid_proposals_never_reach_market_data(proposal: TradeProposal, detail: str) -> None:
-    market_data = healthy_market_data("AAPL")
+    market_data = _healthy()
     decision = _evaluate(proposal, market_data=market_data)
     assert not decision.approved
     assert decision.symbol is None
@@ -284,7 +301,7 @@ def test_market_data_outage_rejects() -> None:
 
 
 def test_missing_quote_and_bars_reject() -> None:
-    market_data = healthy_market_data("AAPL")
+    market_data = _healthy()
     market_data.quotes.clear()
     market_data.bars.clear()
     decision = _evaluate(market_data=market_data)
@@ -298,7 +315,12 @@ def test_missing_quote_and_bars_reject() -> None:
 
 def test_whole_shares_when_not_fractionable() -> None:
     market_data = _data(
-        assets=make_asset("AAPL", fractionable=False), quotes=make_quote(bid="19.99", ask="20")
+        assets=make_asset("AAPL", fractionable=False),
+        quotes=make_quote(bid="19.99", ask="20"),
+        bars=tuple(
+            b.model_copy(update={"high": b.close + Decimal("0.2"), "low": b.close - Decimal("0.2")})
+            for b in make_bars("AAPL", [str(19 + i / 30) for i in range(30)])
+        ),
     )
     decision = _evaluate(_proposal(price="20"), market_data=market_data)
     assert decision.plan is not None
@@ -374,3 +396,124 @@ def test_sizing_uses_the_most_conservative_money_figure() -> None:
     decision = _evaluate(broker=broker)
     assert decision.plan is not None
     assert decision.plan.quantity == Decimal("0.1959")  # $20 / $102.05
+
+
+# ---------- Trade score (ADR 0015) ----------
+
+
+def test_every_decision_carries_its_score() -> None:
+    decision = _evaluate()
+    assert decision.approved
+    assert decision.score is not None
+    assert decision.score.passed
+    check = _check(decision, "Trade score")
+    assert check.passed
+    assert check.detail.startswith(decision.score.summary)
+
+
+def test_a_poor_score_rejects_the_trade() -> None:
+    falling = make_bars("AAPL", [str(103 - i / 10) for i in range(30)])
+    decision = _evaluate(
+        market_data=_data(bars=falling),
+        config={"scoring": {"min_score": 75}},
+    )
+    assert not decision.approved
+    assert _failed(decision) == ["Trade score", "Position size"]
+    assert "needs 75" in _check(decision, "Trade score").detail
+    assert decision.score is not None
+    assert not decision.score.passed
+
+
+def test_a_hard_fail_is_explained() -> None:
+    decision = _evaluate(market_data=_data(bars=make_bars(volume=2_000_000)))  # 3 bars
+    assert "Trade score" in _failed(decision)
+    assert "3 daily bars; at least 21 are needed" in _check(decision, "Trade score").detail
+
+
+def test_scoring_can_be_disabled() -> None:
+    decision = _evaluate(
+        market_data=_data(bars=make_bars(volume=2_000_000)),
+        config={"scoring": {"enabled": False}},
+    )
+    assert decision.approved
+    assert _check(decision, "Trade score").detail == "disabled (scoring.enabled: false)"
+    assert decision.score is None
+
+
+def test_losing_history_lowers_the_score() -> None:
+    neutral = _evaluate()
+    losing = _evaluate(history=lambda: [Decimal("-5")] * 12)
+    assert neutral.score is not None
+    assert losing.score is not None
+    assert losing.score.total < neutral.score.total
+    assert losing.score.expected_value_pct == Decimal("-5.00")
+
+
+def test_unreadable_history_is_neutral_not_a_rejection() -> None:
+    def broken() -> list[Decimal]:
+        raise RuntimeError("audit store down")
+
+    decision = _evaluate(history=broken)
+    assert decision.approved
+    assert decision.score is not None
+    history = next(c for c in decision.score.components if c.name == "History")
+    assert history.detail == "history unavailable: neutral"
+
+
+def test_the_score_needs_enough_bars_so_more_are_fetched() -> None:
+    market_data = _healthy()
+    _evaluate(market_data=market_data)
+    assert ("bars", ("AAPL",)) in market_data.calls
+    # Liquidity still averages only the configured lookback.
+    decision = _evaluate(market_data=market_data)
+    assert "over 20 days" in _check(decision, "Liquidity").detail
+
+
+# ---------- Several open positions (paper, ADR 0015) ----------
+
+PAPER3 = {"risk": {"max_trades_per_day": 3, "max_open_positions": 3}}
+
+
+def test_more_positions_are_allowed_up_to_the_cap() -> None:
+    broker = FakeBroker(positions=(make_position("MSFT"), make_position("NVDA")), orders_today=2)
+    decision = _evaluate(broker=broker, config=PAPER3)
+    assert decision.approved, _failed(decision)
+    assert _check(decision, "Open positions").detail == "2 of 3 open (MSFT, NVDA)"
+    assert _check(decision, "Trades today").detail == "2 of 3"
+
+
+def test_at_the_cap_no_new_position() -> None:
+    held = tuple(make_position(s) for s in ("MSFT", "NVDA", "AMD"))
+    decision = _evaluate(broker=FakeBroker(positions=held), config=PAPER3)
+    assert "Open positions" in _failed(decision)
+    assert "3 open; at most 3 at a time" in _check(decision, "Open positions").detail
+
+
+def test_never_buy_a_symbol_already_held() -> None:
+    decision = _evaluate(broker=FakeBroker(positions=(make_position("AAPL"),)), config=PAPER3)
+    assert "Open positions" in _failed(decision)
+    assert "already holding AAPL" in _check(decision, "Open positions").detail
+
+
+def test_the_floor_counts_the_stops_of_open_positions() -> None:
+    # Equity $100 with $70 floor: each open $50 position can lose $2.50 at its 5% stop.
+    held = (
+        make_position("MSFT", quantity="0.5", avg="100"),
+        make_position("NVDA", quantity="0.5", avg="100"),
+    )
+    config = {"risk": {"max_trades_per_day": 3, "max_open_positions": 3, "account_floor_usd": 95}}
+    decision = _evaluate(broker=FakeBroker(positions=held, equity="100", cash="100"), config=config)
+    assert "Position size" in _failed(decision)
+    assert "open positions could lose $5.00" in _check(decision, "Position size").detail
+
+
+def test_live_cannot_hold_more_than_one_position() -> None:
+    with pytest.raises(ValueError, match="live trading allows one trade and one position"):
+        AppConfig.model_validate(
+            {
+                "environment": "live",
+                "broker": {"paper": False},
+                "storage": {"required": True},
+                "risk": {"max_trades_per_day": 3, "max_open_positions": 3},
+            }
+        )
