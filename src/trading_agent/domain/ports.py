@@ -21,9 +21,11 @@ from trading_agent.domain.models import (
     LLMRequest,
     LLMResponse,
     MarketClock,
+    Mover,
     NewsArticle,
     Position,
     Quote,
+    Snapshot,
 )
 
 
@@ -68,6 +70,14 @@ class MarketDataPort(Protocol):
 
     def get_daily_bars(self, symbols: Sequence[str], *, days: int) -> dict[str, tuple[Bar, ...]]:
         """The most recent `days` daily bars per symbol, oldest first."""
+        ...
+
+    def get_snapshots(self, symbols: Sequence[str]) -> dict[str, Snapshot]:
+        """Latest trade (extended hours included) and the last two daily sessions."""
+        ...
+
+    def get_movers(self, limit: int) -> tuple[Mover, ...]:
+        """Up to `limit` top gainers and `limit` top losers by percent change."""
         ...
 
     def get_most_active(self, limit: int) -> tuple[ActiveStock, ...]:

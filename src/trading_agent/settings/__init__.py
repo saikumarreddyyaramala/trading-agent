@@ -25,6 +25,7 @@ from trading_agent.settings.models import (
     ScoringConfig,
     StorageConfig,
     ToolsConfig,
+    WatchConfig,
 )
 from trading_agent.settings.secrets import Secrets
 
@@ -50,6 +51,7 @@ __all__ = [
     "Secrets",
     "StorageConfig",
     "ToolsConfig",
+    "WatchConfig",
     "assert_live_trading_allowed",
     "load_config",
 ]

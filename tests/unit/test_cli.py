@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pytest
 import sqlalchemy as sa
@@ -1405,3 +1406,94 @@ def test_repo_config_trades_three_times_a_day_on_paper_only(config_dir: Path) ->
     assert paper.scoring.min_score == 60
     live = load_config("live", config_dir)
     assert (live.risk.max_trades_per_day, live.risk.max_open_positions) == (1, 1)
+
+
+# ---------- watch and plan (ADR 0016) ----------
+
+
+def test_watch_command_scans_now(config_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from datetime import time as clock_time
+
+    from tests.unit.test_market_watch import snap
+
+    zone = ZoneInfo("America/New_York")
+    now = datetime.now(zone)
+    traded = max(now, datetime.combine(now.date(), clock_time(4, 5), tzinfo=zone))
+    market = FakeMarketData(
+        snapshots={
+            "AAPL": snap("AAPL", "104", traded, "100", now - timedelta(days=1)),
+            "MSFT": snap("MSFT", "100.5", traded, "100", now - timedelta(days=1)),
+        }
+    )
+    monkeypatch.setattr(Container, "build_market_data", lambda self: market)
+    monkeypatch.setattr(Container, "build_news", lambda self: FakeNews())
+    result = runner.invoke(
+        cli.app, ["watch", "AAPL", "MSFT", "--phase", "pre", "--config-dir", str(config_dir)]
+    )
+    assert result.exit_code == 0, result.output
+    assert "Pre-market watch" in result.output
+    assert "AAPL" in result.output
+    assert "ALERT" in result.output
+
+    as_json = runner.invoke(
+        cli.app, ["watch", "--phase", "pre", "--json", "--config-dir", str(config_dir)]
+    )
+    assert json.loads(as_json.stdout)["phase"] == "pre"
+
+
+def test_watch_command_needs_market_data_keys(config_dir: Path) -> None:
+    result = runner.invoke(cli.app, ["watch", "--config-dir", str(config_dir)])
+    assert result.exit_code == 2
+    assert "Configuration error" in result.output
+
+
+def test_plan_command(config_dir: Path, audit_db: sa.Engine) -> None:
+    from trading_agent.domain.models import DayPlan, PlanItem
+
+    store = SqlAuditStore(audit_db, AppConfig())
+    empty = runner.invoke(
+        cli.app, ["plan", "--date", "2026-10-16", "--config-dir", str(config_dir)]
+    )
+    assert empty.exit_code == 1
+    assert "No plan for 2026-10-16" in empty.output
+
+    store.record_plan(
+        None,
+        DayPlan(
+            source_day=date(2026, 10, 15),
+            for_day=date(2026, 10, 16),
+            created_at=NOW,
+            items=(PlanItem(kind="ops", symbol=None, text="Fix the thing.", priority=1),),
+            summary="1 item(s) for 2026-10-16: 1 ops",
+        ),
+    )
+    result = runner.invoke(
+        cli.app, ["plan", "--date", "2026-10-16", "--config-dir", str(config_dir)]
+    )
+    assert result.exit_code == 0, result.output
+    assert "1 item(s) for 2026-10-16: 1 ops" in result.output
+    assert "1  ops     Fix the thing." in result.output
+
+    as_json = runner.invoke(
+        cli.app, ["plan", "--date", "2026-10-16", "--json", "--config-dir", str(config_dir)]
+    )
+    assert json.loads(as_json.stdout)["items"][0]["kind"] == "ops"
+    bad = runner.invoke(cli.app, ["plan", "--date", "soon", "--config-dir", str(config_dir)])
+    assert bad.exit_code == 2
+
+
+def test_watch_rejects_an_unknown_phase(config_dir: Path) -> None:
+    result = runner.invoke(cli.app, ["watch", "--phase", "lunch", "--config-dir", str(config_dir)])
+    assert result.exit_code == 2
+    assert "--phase must be pre or post" in result.output
+
+
+def test_watch_shows_data_problems_as_warnings(
+    config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    market = FakeMarketData(fail_snapshots=True)
+    monkeypatch.setattr(Container, "build_market_data", lambda self: market)
+    monkeypatch.setattr(Container, "build_news", lambda self: FakeNews())
+    result = runner.invoke(cli.app, ["watch", "AAPL", "--config-dir", str(config_dir)])
+    assert result.exit_code == 0
+    assert "Warning: snapshots unavailable" in result.output

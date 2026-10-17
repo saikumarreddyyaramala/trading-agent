@@ -769,3 +769,51 @@ def test_unreadable_slots_are_a_warning(store: SqlAuditStore) -> None:
     report = _builder(store).build(DAY)
     assert report.slots == []
     assert "trade slots unavailable: db down" in report.warnings
+
+
+# ---------- Market watch and plan (ADR 0016) ----------
+
+
+def test_report_shows_the_watch_and_the_plan(store: SqlAuditStore) -> None:
+    from tests.unit.test_market_watch import FOCUS, _pre_market, _watch
+    from trading_agent.planning import Planner
+
+    _record_trading_day(store)
+    store.record_watch(RUN, _watch(_pre_market()).scan("pre", DAY, FOCUS))
+    Planner(store, AppConfig(), next_session=lambda: date(2026, 10, 16)).plan(DAY)
+    report = _builder(store).build(DAY)
+    assert report.premarket_alerts[0] == "UP +8.33% pre-market (gainer)"
+    assert report.after_hours_alerts == []
+    assert report.plan_for == date(2026, 10, 16)
+    assert report.plan[0].startswith("[review] AAPL won")
+    markdown = render_markdown(report)
+    assert "## Market watch" in markdown
+    assert "Pre-market: UP +8.33% pre-market (gainer); AAPL +4.00% pre-market" in markdown
+    assert "## Plan for Friday 2026-10-16" in markdown
+    assert "- [review] AAPL won +2.00% (exit order): note what worked." in markdown
+
+
+def test_no_watch_or_plan_means_no_sections(store: SqlAuditStore) -> None:
+    _record_trading_day(store)
+    markdown = render_markdown(_builder(store).build(DAY))
+    assert "## Market watch" not in markdown
+    assert "## Plan for" not in markdown
+
+
+def test_after_hours_alerts_and_an_unreadable_watch(store: SqlAuditStore) -> None:
+    from tests.conftest import FakeMarketData
+    from tests.unit.test_market_watch import _watch, ny, snap
+
+    _record_trading_day(store)
+    market = FakeMarketData(snapshots={"NVDA": snap("NVDA", "94", ny(16, 40), "100", ny(9, 30))})
+    store.record_watch(RUN, _watch(market, now=ny(16, 45)).scan("post", DAY, {"NVDA": ["traded"]}))
+    markdown = render_markdown(_builder(store).build(DAY))
+    assert "After hours: NVDA -6.00% after hours (traded)." in markdown
+
+    def down(day: Any, phase: Any) -> Any:
+        raise AuditError("db down")
+
+    store.get_watch = down  # type: ignore[method-assign]
+    report = _builder(store).build(DAY)
+    assert "market watch and plan unavailable: db down" in report.warnings
+    assert report.plan_for is None

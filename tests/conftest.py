@@ -284,7 +284,15 @@ class FakeMarketData:
         assets: dict[str, Asset] | None = None,
         active: Sequence[ActiveStock] = (),
         fail: bool = False,
+        snapshots: dict[str, Any] | None = None,
+        movers: Sequence[Any] = (),
+        fail_snapshots: bool = False,
+        fail_movers: bool = False,
     ) -> None:
+        self.snapshots = snapshots or {}
+        self.movers = tuple(movers)
+        self.fail_snapshots = fail_snapshots
+        self.fail_movers = fail_movers
         self.quotes = quotes or {}
         self.bars = bars or {}
         self.assets = assets or {}
@@ -307,6 +315,18 @@ class FakeMarketData:
     def get_daily_bars(self, symbols: Sequence[str], *, days: int) -> dict[str, tuple[Bar, ...]]:
         self.calls.append(("bars", tuple(symbols)))
         return {s: self.bars[s][-days:] for s in symbols if s in self.bars}
+
+    def get_snapshots(self, symbols: Sequence[str]) -> dict[str, Any]:
+        self.calls.append(("snapshots", tuple(symbols)))
+        if self.fail_snapshots:
+            raise MarketDataError("could not fetch snapshots: down")
+        return {s: self.snapshots[s] for s in symbols if s in self.snapshots}
+
+    def get_movers(self, limit: int) -> tuple[Any, ...]:
+        self.calls.append(("movers", (str(limit),)))
+        if self.fail_movers:
+            raise MarketDataError("could not fetch market movers: down")
+        return self.movers[: 2 * limit]
 
     def get_most_active(self, limit: int) -> tuple[ActiveStock, ...]:
         self.calls.append(("most_active", (str(limit),)))

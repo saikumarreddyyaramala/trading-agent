@@ -1,8 +1,11 @@
 """The daily trading cycle: one run per trading day, driven by the configured schedule.
 
-    preflight (data_collection) -> analysis (analysis) -> entry (trade_window_start)
-    -> manage every minute -> close (force_close) -> reconcile (report)
-    -> reflect (self-learning, ADR 0013) -> report
+    premarket watch -> preflight (data_collection) -> analysis (analysis, with the
+    morning brief) -> entry (trade_window_start) -> manage every minute
+    -> close (force_close) -> reconcile (report) -> post-market watch (post_market)
+    -> reflect (self-learning, ADR 0013) -> plan for the next session -> report
+
+The watch and the plan (ADR 0016) are bookkeeping: a failure is recorded, never blocking.
 
 On paper, up to two more analysis-and-entry slots run during the session
 (`schedule.extra_analyses`, capped by `risk.max_trades_per_day`; ADR 0015). Each
@@ -46,13 +49,16 @@ from trading_agent.storage.store import AuditError, AuditRecorder, AuditStore
 
 MAX_SLEEP_SECONDS = 60  # wake at least this often while waiting, to log and stay responsive
 STEPS = (
+    "premarket",
     "preflight",
     "analysis",
     "critique",
     "entry",
     "close",
     "reconcile",
+    "postmarket",
     "reflect",
+    "plan",
     "report",
 )
 
@@ -87,6 +93,12 @@ class CycleServices:
     reflect: Callable[[date], str] | None = None
     # A reason to skip an extra slot before spending tokens (positions full, ...).
     capacity: Callable[[], str | None] | None = None
+    # Market watch and next-day plan (ADR 0016); each returns a short description.
+    premarket: Callable[[date], str] | None = None
+    postmarket: Callable[[date], str] | None = None
+    plan: Callable[[date], str] | None = None
+    # The analyst's morning brief: yesterday's plan and the pre-market alerts.
+    brief: Callable[[date], str | None] | None = None
 
 
 @dataclass(frozen=True)
@@ -103,6 +115,8 @@ class Session:
     market_close: datetime
     early_close: bool
     slots: tuple[datetime, ...] = ()  # extra analysis-and-entry slots (ADR 0015)
+    premarket: datetime | None = None  # market watch (ADR 0016)
+    post_market: datetime | None = None
 
 
 class DayResult(BaseModel):
@@ -185,6 +199,8 @@ class DailyCycle:
             market_close=closes,
             early_close=force_close < self._at(day, schedule.force_close),
             slots=slots,
+            premarket=self._at(day, schedule.premarket_watch),
+            post_market=max(self._at(day, schedule.post_market), closes + timedelta(minutes=30)),
         )
 
     # ---------- Recording ----------
@@ -242,17 +258,19 @@ class DailyCycle:
         if session.early_close:
             self._log.warning("cycle.early_close", force_close=session.force_close.isoformat())
 
+        self._side_step(run_id, "premarket", self._services.premarket, session, done)
         halted = self._preflight(run_id, session, done)
         if not audit_ok and self._services.recorder.required:
             halted = True  # no record, no trade
-        proposal, calls = self._analysis(run_id, session, done, halted)
+        brief = None if halted or "analysis" in done else self._brief(session)
+        proposal, calls = self._analysis(run_id, session, done, halted, context=brief)
         proposal = self._critique(run_id, done, proposal, calls)
         traded = self._entry(run_id, session, done, halted, proposal)
         bought = [proposal.symbol] if traded and proposal and proposal.symbol else []
         notes = []
         for number, slot_at in enumerate(session.slots, start=2):
             self._manage_until(run_id, session, until=slot_at)
-            note = self._slot(run_id, number, slot_at, session, done, halted, bought)
+            note = self._slot(run_id, number, slot_at, session, done, halted, bought, brief)
             if note:
                 notes.append(note)
         self._manage_until(run_id, session)
@@ -278,7 +296,9 @@ class DailyCycle:
         else:
             status, summary = "no_trade", "; ".join([first, *notes])
         self._record("run result", lambda s: s.finish_run(run_id, status, summary))
+        self._side_step(run_id, "postmarket", self._services.postmarket, session, done)
         self._reflect(run_id, session, done)  # never affects the day's trades or result
+        self._side_step(run_id, "plan", self._services.plan, session, done)
         self._report(run_id, session, done)  # after the result, so the report includes it
         self._log.info("cycle.day_finished", run_id=run_id, status=status, summary=summary)
         return DayResult(
@@ -453,6 +473,7 @@ class DailyCycle:
         done: dict[str, str],
         halted: bool,
         bought: list[str],
+        brief: str | None = None,
     ) -> str | None:
         """One extra analysis-and-entry slot, as its own run. Returns a note for the summary."""
         step = f"slot{number}"
@@ -486,7 +507,7 @@ class DailyCycle:
         self._steps[slot_run] = slot_done
         self._details[slot_run] = {}
         total = len(session.slots) + 1
-        context = (
+        context = (f"{brief}\n\n" if brief else "") + (
             f"This is trade slot {number} of {total} today. Already bought today: "
             f"{', '.join(bought) or 'nothing yet'} (positions may still be open). Propose a "
             "different symbol, or no_trade."
@@ -546,6 +567,37 @@ class DailyCycle:
         self._record("orders", lambda s: s.record_orders(None, orders))
         self._step(run_id, "reconcile", "ok", f"synced {len(orders)} order(s)", started)
 
+    def _brief(self, session: Session) -> str | None:
+        if self._services.brief is None:
+            return None
+        try:
+            return self._services.brief(session.day)
+        except Exception as exc:  # advisory context: never a reason to skip the analysis
+            self._log.warning("cycle.brief_failed", error=str(exc))
+            return None
+
+    def _side_step(
+        self,
+        run_id: str,
+        step: str,
+        fn: Callable[[date], str] | None,
+        session: Session,
+        done: dict[str, str],
+    ) -> None:
+        """A bookkeeping step at its scheduled time: recorded, resumable, never blocking."""
+        if step in done or fn is None:
+            return
+        at = session.premarket if step == "premarket" else session.post_market
+        if at is not None:
+            self._wait_until(at, step)
+        started = self._now()
+        try:
+            detail = fn(session.day)
+        except Exception as exc:
+            self._step(run_id, step, "error", str(exc), started)
+            return
+        self._step(run_id, step, "ok", detail, started)
+
     def _reflect(self, run_id: str, session: Session, done: dict[str, str]) -> None:
         if "reflect" in done or self._services.reflect is None:
             return
@@ -579,4 +631,9 @@ class DailyCycle:
             if should_stop():
                 break
             tomorrow = today + timedelta(days=1)
-            self._wait_until(self._at(tomorrow, self._config.schedule.data_collection), "next day")
+            # Wake for the earliest step: the pre-market scan when it is wired in.
+            schedule = self._config.schedule
+            first = (
+                schedule.premarket_watch if self._services.premarket else schedule.data_collection
+            )
+            self._wait_until(self._at(tomorrow, first), "next day")

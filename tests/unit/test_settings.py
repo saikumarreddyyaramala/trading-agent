@@ -295,3 +295,20 @@ def test_repo_config_learning(config_dir: Path) -> None:
 def test_invalid_learning_settings_are_rejected(override: dict[str, object]) -> None:
     with pytest.raises(ValueError, match="learning"):
         AppConfig.model_validate({"learning": override})
+
+
+def test_repo_config_watch(config_dir: Path) -> None:
+    from datetime import time
+
+    config = load_config("paper", config_dir)
+    assert config.schedule.premarket_watch == time(8, 0)
+    assert config.schedule.post_market == time(16, 45)
+    assert config.watch.enabled
+    assert config.watch.gap_alert_pct == Decimal(3)
+
+
+def test_watch_times_are_validated() -> None:
+    with pytest.raises(ValueError, match="premarket_watch must come before"):
+        AppConfig.model_validate({"schedule": {"premarket_watch": "08:30"}})
+    with pytest.raises(ValueError, match="post_market must not come before"):
+        AppConfig.model_validate({"schedule": {"post_market": "16:00"}})

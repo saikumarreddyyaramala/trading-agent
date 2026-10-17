@@ -41,10 +41,12 @@ from trading_agent.llm.gateway import LLMGateway
 from trading_agent.llm.openai_provider import OpenAIProvider
 from trading_agent.mcp_server.server import build_server
 from trading_agent.mcp_server.tools import ResearchTools
-from trading_agent.orchestration.cycle import CycleServices
+from trading_agent.orchestration.cycle import CycleServices, DailyCycle
+from trading_agent.planning import Planner, morning_brief
 from trading_agent.reporting.delivery import post_webhook, save_report
 from trading_agent.reporting.performance import trades_from_orders
 from trading_agent.reporting.report import ReportBuilder, render_markdown
+from trading_agent.reporting.slots import slot_runs
 from trading_agent.risk.engine import RiskEngine
 from trading_agent.settings.loader import ConfigError
 from trading_agent.settings.models import AppConfig, LLMConfig
@@ -62,6 +64,7 @@ from trading_agent.storage.store import (
     NullAuditStore,
     SqlAuditStore,
 )
+from trading_agent.watch import MarketWatch, Phase
 
 
 @dataclass(frozen=True)
@@ -291,7 +294,77 @@ class Container:
             critique=critique,
             reflect=self.learn if self.config.learning.enabled else None,
             capacity=self.slot_capacity,
+            premarket=self.premarket,
+            postmarket=self.postmarket,
+            plan=self.make_plan,
+            brief=self.brief,
         )
+
+    # ---------- Market watch and the next-day plan (ADR 0016) ----------
+
+    def build_market_watch(self) -> MarketWatch:
+        return MarketWatch(self.build_market_data(), self.build_news(), self.config)
+
+    def _held(self) -> list[str]:
+        try:
+            return [p.symbol for p in self.build_broker().get_positions()]
+        except Exception:  # the watch still runs without positions
+            return []
+
+    def _scan(self, phase: Phase, day: date, focus: dict[str, list[str]]) -> str:
+        store = self.build_audit_store()
+        report = self.build_market_watch().scan(phase, day, focus)
+        store.record_watch(DailyCycle.run_id(day), report)
+        detail = f"scanned {len(report.items)} symbols, {len(report.alerts)} alert(s)"
+        return detail + (f"; {'; '.join(report.errors)}" if report.errors else "")
+
+    def premarket(self, day: date) -> str:
+        """Scan before the open: yesterday's plan symbols, open positions, top movers."""
+        focus: dict[str, list[str]] = {}
+        plan = self.build_audit_store().plan_for(day)
+        for item in (plan or {}).get("items", []):
+            if item.get("symbol"):
+                focus.setdefault(item["symbol"], []).append("plan")
+        for symbol in self._held():
+            focus.setdefault(symbol, []).append("held")
+        return self._scan("pre", day, focus)
+
+    def postmarket(self, day: date) -> str:
+        """Scan after the close: today's trades and ideas, open positions, top movers."""
+        store = self.build_audit_store()
+        zone = ZoneInfo(self.config.schedule.timezone)
+        start = datetime.combine(day, time(0), tzinfo=zone)
+        focus: dict[str, list[str]] = {}
+        for trade in trades_from_orders(
+            store.orders_between(start, start + timedelta(days=1)), zone
+        ):
+            if trade.day == day:
+                focus.setdefault(trade.symbol, []).append("traded")
+        main = store.get_run(DailyCycle.run_id(day))
+        for run in [main, *slot_runs(store, DailyCycle.run_id(day))] if main else []:
+            proposal = (run["analysis"] or {}).get("proposal") or {}
+            if proposal.get("decision") == "buy" and proposal.get("symbol"):
+                reasons = focus.setdefault(proposal["symbol"], [])
+                if "proposed" not in reasons:
+                    reasons.append("proposed")
+        for symbol in self._held():
+            focus.setdefault(symbol, []).append("held")
+        return self._scan("post", day, focus)
+
+    def make_plan(self, day: date) -> str:
+        """The to-do list for the next session. Needs a database: plans must persist."""
+        store = self.build_audit_store()
+        if isinstance(store, NullAuditStore):
+            return "skipped: no database, so there is nowhere to keep the plan"
+        zone = ZoneInfo(self.config.schedule.timezone)
+
+        def next_session() -> date:
+            return self.build_broker().get_clock().next_open.astimezone(zone).date()
+
+        return Planner(store, self.config, next_session=next_session).plan(day).summary
+
+    def brief(self, day: date) -> str | None:
+        return morning_brief(self.build_audit_store(), day)
 
     def publish_report(self, day: date, *, send: bool = True) -> str:
         """Build the day's report, save it, and post it to the webhook if one is set."""

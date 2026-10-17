@@ -1080,3 +1080,121 @@ def test_unreadable_slot_steps_start_the_slot_afresh(tmp_path: Path) -> None:
     h.services.recorder.store = _Forgetful(h.engine, AppConfig(), clock=h.time.clock)
     result = h.cycle.run_day(THURSDAY)
     assert result.steps["slot2"] == "entered"
+
+
+# ---------- Market watch, plan, and morning brief (ADR 0016) ----------
+
+
+def _watched(h: Harness, **overrides: Any) -> DailyCycle:
+    def tracked(name: str, result: str | None = "ok") -> Any:
+        def call(day: date) -> str | None:
+            h.calls.append((name, h._now()))
+            return result
+
+        return call
+
+    services: dict[str, Any] = {
+        "premarket": tracked("premarket", "scanned 12 symbols, 2 alerts"),
+        "postmarket": tracked("postmarket", "scanned 8 symbols, 1 alert"),
+        "plan": tracked("plan", "4 item(s) for 2026-10-16"),
+        "brief": tracked("brief", "Morning brief (advisory: verify everything with your tools)."),
+        "reflect": tracked("reflect", "1 new, 0 retired"),
+        "report": tracked("report", "saved"),
+    }
+    services.update(overrides)
+    return _rebuild(h, **services)
+
+
+def test_the_day_starts_with_a_scan_and_ends_with_a_plan(tmp_path: Path) -> None:
+    h = Harness(tmp_path)
+    result = _watched(h).run_day(THURSDAY)
+    order = [name for name, _ in h.calls if name != "evaluate"]
+    assert order[:4] == ["premarket", "health", "brief", "analyze"]
+    assert order[-5:] == ["reconcile", "postmarket", "reflect", "plan", "report"]
+    assert h.when("premarket") == at(8)
+    assert h.when("postmarket") == at(16, 45)
+    assert result.steps["premarket"] == "ok"
+    assert result.steps["postmarket"] == "ok"
+    assert result.steps["plan"] == "ok"
+    (step,) = [s for s in h.rows(schema.run_steps) if s["step"] == "plan"]
+    assert step["detail"] == "4 item(s) for 2026-10-16"
+
+
+def test_the_analyst_gets_the_morning_brief(tmp_path: Path) -> None:
+    h = Harness(tmp_path, config=THREE)
+    _watched(h).run_day(THURSDAY)
+    (_, first), (_, second), _ = h.contexts
+    assert first == "Morning brief (advisory: verify everything with your tools)."
+    assert second is not None
+    assert second.startswith("Morning brief")
+    assert "trade slot 2 of 3" in second
+
+
+def test_a_failing_brief_never_blocks_the_analysis(tmp_path: Path) -> None:
+    h = Harness(tmp_path)
+    result = _watched(h, brief=_boom).run_day(THURSDAY)
+    assert h.contexts == [(RUN_ID, None)]
+    assert result.steps["analysis"] == "proposed"
+
+
+@pytest.mark.parametrize("step", ["premarket", "postmarket", "plan"])
+def test_watch_and_plan_failures_are_contained(tmp_path: Path, step: str) -> None:
+    h = Harness(tmp_path)
+    result = _watched(h, **{step: _boom}).run_day(THURSDAY)
+    assert result.steps[step] == "error"
+    assert result.status == "traded"
+    assert result.steps["report"] == "ok"
+
+
+def test_a_halted_day_still_scans_and_plans(tmp_path: Path) -> None:
+    h = Harness(tmp_path, health_ok=False)
+    result = _watched(h).run_day(THURSDAY)
+    assert result.status == "halted"
+    assert result.steps["postmarket"] == "ok"
+    assert result.steps["plan"] == "ok"
+    assert not h.called("brief")  # no analysis, so no brief
+
+
+def test_finished_watch_steps_are_not_repeated(tmp_path: Path) -> None:
+    setup = Harness(tmp_path)
+    store = _resumed_store(
+        setup,
+        {
+            "premarket": "ok",
+            "preflight": "ok",
+            "analysis": "no_trade",
+            "entry": "skipped",
+            "close": "ok",
+            "reconcile": "ok",
+            "postmarket": "ok",
+            "reflect": "ok",
+            "plan": "ok",
+        },
+    )
+    h = Harness(tmp_path, start=at(15, 55), store=store)
+    _watched(h).run_day(THURSDAY)
+    assert {"premarket", "postmarket", "plan", "reflect"}.isdisjoint(n for n, _ in h.calls)
+    assert h.called("report")
+
+
+def test_post_market_waits_for_an_early_close(tmp_path: Path) -> None:
+    h = Harness(tmp_path, calendar={"early": {THURSDAY: time(13)}})
+    session = h.cycle.session(THURSDAY)
+    assert session is not None
+    assert session.premarket == at(8)
+    assert session.post_market == at(16, 45)  # later of 16:45 and 30 minutes after 13:00
+
+
+def test_the_next_day_starts_in_time_for_the_premarket_scan(tmp_path: Path) -> None:
+    h = Harness(tmp_path)
+    _watched(h)
+    days = {"n": 0}
+
+    def stop() -> bool:
+        days["n"] = len([c for c in h.calls if c[0] == "premarket"])
+        return days["n"] >= 2
+
+    h.cycle.run_forever(should_stop=stop)
+    first, second = [t for name, t in h.calls if name == "premarket"]
+    assert first == at(8)
+    assert second == at(8, 0, date(2026, 10, 16))  # Friday's scan at 08:00, not 08:30

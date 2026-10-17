@@ -11,12 +11,18 @@ from typing import Any, Literal
 
 from alpaca.data.enums import Adjustment, DataFeed, MostActivesBy
 from alpaca.data.historical import ScreenerClient, StockHistoricalDataClient
-from alpaca.data.requests import MostActivesRequest, StockBarsRequest, StockLatestQuoteRequest
+from alpaca.data.requests import (
+    MarketMoversRequest,
+    MostActivesRequest,
+    StockBarsRequest,
+    StockLatestQuoteRequest,
+    StockSnapshotRequest,
+)
 from alpaca.data.timeframe import TimeFrame
 from alpaca.trading.client import TradingClient
 
 from trading_agent.data.errors import MarketDataError
-from trading_agent.domain.models import ActiveStock, Asset, Bar, Quote
+from trading_agent.domain.models import ActiveStock, Asset, Bar, Mover, Quote, Snapshot
 
 QuoteFeed = Literal["iex", "sip", "delayed_sip"]
 BarsFeed = Literal["iex", "sip"]
@@ -25,6 +31,8 @@ BarsFeed = Literal["iex", "sip"]
 SIP_HISTORY_DELAY = timedelta(minutes=16)
 # Largest list the most-actives screener returns.
 MAX_MOST_ACTIVE = 100
+# Largest list of gainers (and of losers) the movers screener returns.
+MAX_MOVERS = 50
 
 
 def _decimal(value: Any) -> Decimal:
@@ -158,3 +166,51 @@ class AlpacaMarketData:
         ]
         stocks.sort(key=lambda stock: stock.volume, reverse=True)
         return tuple(stocks[:limit])
+
+    def get_snapshots(self, symbols: Sequence[str]) -> dict[str, Snapshot]:
+        if not symbols:
+            return {}
+        request = StockSnapshotRequest(symbol_or_symbols=list(symbols), feed=self._quote_feed)
+        try:
+            raw = self._data.get_stock_snapshot(request)
+        except Exception as exc:
+            raise MarketDataError(
+                f"could not fetch snapshots: {type(exc).__name__}: {exc}"
+            ) from exc
+
+        def close(bar: Any) -> Decimal | None:
+            return None if bar is None else _decimal(bar.close)
+
+        result: dict[str, Snapshot] = {}
+        for symbol, snap in raw.items():
+            trade, session, previous = snap.latest_trade, snap.daily_bar, snap.previous_daily_bar
+            result[symbol] = Snapshot(
+                symbol=symbol,
+                last_price=None if trade is None else _decimal(trade.price),
+                last_trade_at=None if trade is None else trade.timestamp,
+                session_close=close(session),
+                session_at=None if session is None else session.timestamp,
+                previous_close=close(previous),
+                session_volume=None if session is None else int(session.volume),
+            )
+        return result
+
+    def get_movers(self, limit: int) -> tuple[Mover, ...]:
+        if not 1 <= limit <= MAX_MOVERS:
+            raise ValueError(f"limit must be between 1 and {MAX_MOVERS}")
+        try:
+            raw = self._screener.get_market_movers(MarketMoversRequest(top=limit))
+        except Exception as exc:
+            raise MarketDataError(
+                f"could not fetch market movers: {type(exc).__name__}: {exc}"
+            ) from exc
+        return tuple(
+            Mover(
+                symbol=str(item.symbol),
+                price=_decimal(item.price),
+                change_pct=_decimal(item.percent_change),
+                direction=direction,
+            )
+            for direction, items in (("gainer", raw.gainers), ("loser", raw.losers))
+            for item in items
+        )

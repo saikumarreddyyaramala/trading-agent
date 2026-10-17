@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable, Iterable, Sequence
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Any, Protocol
 
@@ -16,6 +16,7 @@ from trading_agent.agents.analyst import AnalystResult, ToolCallRecord
 from trading_agent.agents.critic import CriticResult
 from trading_agent.domain.models import (
     BrokerOrder,
+    DayPlan,
     Lesson,
     LLMCallRecord,
     RiskDecision,
@@ -25,6 +26,7 @@ from trading_agent.execution.executor import ManageResult
 from trading_agent.observability.logging import get_logger
 from trading_agent.settings.models import AppConfig
 from trading_agent.storage import schema
+from trading_agent.watch.market_watch import WatchReport
 
 _RUN_ORDER = re.compile(r"^ta-(?P<run>[A-Za-z0-9-]+)-(?P<role>entry|stop)$")
 
@@ -136,6 +138,22 @@ class AuditStore(Protocol):
 
     def llm_calls_between(self, start: datetime, end: datetime) -> list[dict[str, Any]]: ...
 
+    def record_watch(self, run_id: str | None, report: WatchReport) -> None: ...
+
+    def get_watch(self, day: date, phase: str) -> WatchReport | None:
+        """The latest scan of that phase for that day."""
+        ...
+
+    def record_plan(self, run_id: str | None, plan: DayPlan) -> None: ...
+
+    def plan_for(self, day: date) -> dict[str, Any] | None:
+        """The latest plan made for `day`."""
+        ...
+
+    def plan_from(self, day: date) -> dict[str, Any] | None:
+        """The latest plan made at the end of `day`."""
+        ...
+
 
 class NullAuditStore:
     """Used when no database is configured: records nothing, finds nothing."""
@@ -217,6 +235,21 @@ class NullAuditStore:
 
     def llm_calls_between(self, start: datetime, end: datetime) -> list[dict[str, Any]]:
         return []
+
+    def record_watch(self, run_id: str | None, report: WatchReport) -> None:
+        return None
+
+    def get_watch(self, day: date, phase: str) -> WatchReport | None:
+        return None
+
+    def record_plan(self, run_id: str | None, plan: DayPlan) -> None:
+        return None
+
+    def plan_for(self, day: date) -> dict[str, Any] | None:
+        return None
+
+    def plan_from(self, day: date) -> dict[str, Any] | None:
+        return None
 
 
 class SqlAuditStore:
@@ -670,6 +703,73 @@ class SqlAuditStore:
             return [dict(row) for row in connection.execute(query).mappings()]
 
         return self._read("llm calls", read)
+
+    def record_watch(self, run_id: str | None, report: WatchReport) -> None:
+        def write(connection: sa.Connection) -> None:
+            connection.execute(
+                schema.market_watch.insert().values(
+                    run_id=run_id if self._run_exists(connection, run_id) else None,
+                    day=report.day,
+                    phase=report.phase,
+                    created_at=report.created_at,
+                    report=report.model_dump(mode="json"),
+                )
+            )
+
+        self._write(f"{report.phase}-market watch", write)
+
+    def get_watch(self, day: date, phase: str) -> WatchReport | None:
+        table = schema.market_watch
+
+        def read(connection: sa.Connection) -> WatchReport | None:
+            row = connection.execute(
+                sa.select(table.c.report)
+                .where(table.c.day == day, table.c.phase == phase)
+                .order_by(table.c.created_at.desc(), table.c.id.desc())
+                .limit(1)
+            ).first()
+            return None if row is None else WatchReport.model_validate(row[0])
+
+        return self._read("market watch", read)
+
+    def record_plan(self, run_id: str | None, plan: DayPlan) -> None:
+        def write(connection: sa.Connection) -> None:
+            connection.execute(
+                schema.day_plans.insert().values(
+                    source_run_id=run_id if self._run_exists(connection, run_id) else None,
+                    source_day=plan.source_day,
+                    for_day=plan.for_day,
+                    created_at=plan.created_at,
+                    items=[i.model_dump(mode="json") for i in plan.items],
+                    summary=plan.summary,
+                )
+            )
+
+        self._write(f"plan for {plan.for_day}", write)
+
+    def plan_for(self, day: date) -> dict[str, Any] | None:
+        return self._latest_plan(schema.day_plans.c.for_day == day)
+
+    def plan_from(self, day: date) -> dict[str, Any] | None:
+        return self._latest_plan(schema.day_plans.c.source_day == day)
+
+    def _latest_plan(self, condition: Any) -> dict[str, Any] | None:
+        table = schema.day_plans
+
+        def read(connection: sa.Connection) -> dict[str, Any] | None:
+            row = (
+                connection.execute(
+                    sa.select(table)
+                    .where(condition)
+                    .order_by(table.c.created_at.desc(), table.c.id.desc())
+                    .limit(1)
+                )
+                .mappings()
+                .first()
+            )
+            return None if row is None else dict(row)
+
+        return self._read("plans", read)
 
     def environments(self) -> set[str]:
         def read(connection: sa.Connection) -> set[str]:

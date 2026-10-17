@@ -290,3 +290,27 @@ def test_day_record_includes_every_slot(store: SqlAuditStore) -> None:
     assert slot["symbol"] == "MSFT"
     assert slot["status"] == "traded"
     assert slot["score"] == "72.5/100 (needs 60)"
+
+
+def test_day_record_shows_the_plan_and_the_after_hours_alerts(store: SqlAuditStore) -> None:
+    from datetime import UTC, datetime
+
+    from trading_agent.domain.models import DayPlan, PlanItem
+
+    _record_trading_day(store)
+    store.record_plan(
+        None,
+        DayPlan(
+            source_day=DAY - timedelta(days=1),
+            for_day=DAY,
+            created_at=datetime.now(UTC),
+            items=(PlanItem(kind="watch", symbol="AAPL", text="Watch AAPL.", priority=1),),
+            summary="1 item",
+        ),
+    )
+    service, _ = _service(store, [])
+    run = store.get_run(RUN)
+    assert run is not None
+    record = service.day_record(DAY, run)
+    assert record["plan_for_today"] == ["[watch] Watch AAPL."]
+    assert record["after_hours_alerts"] == []

@@ -214,3 +214,109 @@ def test_most_active_errors_are_wrapped() -> None:
     adapter, _ = _adapter(screener_client=_Screener(fail=True))
     with pytest.raises(MarketDataError, match="could not fetch most active stocks"):
         adapter.get_most_active(5)
+
+
+# ---------- Snapshots and movers (ADR 0016) ----------
+
+
+class _SnapshotClient(_DataClient):
+    def get_stock_snapshot(self, request: Any) -> Any:
+        self.requests.append(request)
+        if self.fail:
+            raise ConnectionError("network down")
+        return {
+            "AAPL": SimpleNamespace(
+                latest_trade=SimpleNamespace(price=231.5, timestamp=NOW),
+                daily_bar=SimpleNamespace(
+                    timestamp=NOW - timedelta(hours=10), close=229.0, volume=1_000.0
+                ),
+                previous_daily_bar=SimpleNamespace(
+                    timestamp=NOW - timedelta(days=1, hours=10), close=225.0, volume=2_000.0
+                ),
+            ),
+            "NEW": SimpleNamespace(latest_trade=None, daily_bar=None, previous_daily_bar=None),
+        }
+
+
+def test_snapshots_are_translated() -> None:
+    client = _SnapshotClient()
+    adapter = AlpacaMarketData(
+        "k", "s", paper=True, data_client=client, trading_client=_TradingClient()
+    )
+    snaps = adapter.get_snapshots(["AAPL", "NEW"])
+    apple = snaps["AAPL"]
+    assert apple.last_price == Decimal("231.5")
+    assert apple.last_trade_at == NOW
+    assert apple.session_close == Decimal("229.0")
+    assert apple.session_at == NOW - timedelta(hours=10)
+    assert apple.previous_close == Decimal("225.0")
+    assert apple.session_volume == 1000
+    assert snaps["NEW"].last_price is None
+    assert snaps["NEW"].session_close is None
+    assert client.requests[0].feed == DataFeed.IEX
+    assert adapter.get_snapshots([]) == {}
+
+
+def test_snapshot_errors_are_wrapped() -> None:
+    adapter = AlpacaMarketData(
+        "k",
+        "s",
+        paper=True,
+        data_client=_SnapshotClient(fail=True),
+        trading_client=_TradingClient(),
+    )
+    with pytest.raises(MarketDataError, match="could not fetch snapshots"):
+        adapter.get_snapshots(["AAPL"])
+
+
+class _MoversScreener:
+    def __init__(self, *, fail: bool = False) -> None:
+        self.fail = fail
+        self.requests: list[Any] = []
+
+    def get_market_movers(self, request: Any) -> Any:
+        self.requests.append(request)
+        if self.fail:
+            raise ConnectionError("screener down")
+        return SimpleNamespace(
+            gainers=[
+                SimpleNamespace(symbol="UP", price=12.5, percent_change=18.2),
+                SimpleNamespace(symbol="PENNY", price=0.4, percent_change=90.0),
+            ],
+            losers=[SimpleNamespace(symbol="DOWN", price=40.0, percent_change=-11.0)],
+        )
+
+
+def test_movers_are_translated_with_direction() -> None:
+    screener = _MoversScreener()
+    adapter = AlpacaMarketData(
+        "k",
+        "s",
+        paper=True,
+        data_client=_DataClient(),
+        trading_client=_TradingClient(),
+        screener_client=screener,
+    )
+    movers = adapter.get_movers(5)
+    assert [(m.symbol, m.direction, m.change_pct) for m in movers] == [
+        ("UP", "gainer", Decimal("18.2")),
+        ("PENNY", "gainer", Decimal("90.0")),
+        ("DOWN", "loser", Decimal("-11.0")),
+    ]
+    assert movers[0].price == Decimal("12.5")
+    assert screener.requests[0].top == 5
+
+
+def test_movers_errors_are_wrapped_and_limits_bounded() -> None:
+    adapter = AlpacaMarketData(
+        "k",
+        "s",
+        paper=True,
+        data_client=_DataClient(),
+        trading_client=_TradingClient(),
+        screener_client=_MoversScreener(fail=True),
+    )
+    with pytest.raises(MarketDataError, match="could not fetch market movers"):
+        adapter.get_movers(5)
+    with pytest.raises(ValueError, match="between 1 and 50"):
+        adapter.get_movers(51)

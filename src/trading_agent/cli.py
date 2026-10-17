@@ -784,6 +784,77 @@ def critique(
 
 
 @app.command()
+def watch(
+    symbols: Annotated[list[str] | None, typer.Argument(help="Extra symbols to scan.")] = None,
+    phase: Annotated[
+        str, typer.Option("--phase", help="pre (vs the last close) or post (vs today's close).")
+    ] = "pre",
+    as_json: Annotated[bool, typer.Option("--json", help="Machine-readable output.")] = False,
+    env: EnvOption = None,
+    config_dir: ConfigDirOption = None,
+) -> None:
+    """Scan pre-market or after-hours moves and news now (records nothing)."""
+    container = _container(env, config_dir)
+    if phase not in ("pre", "post"):
+        typer.secho("--phase must be pre or post.", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=2)
+    zone = ZoneInfo(container.config.schedule.timezone)
+    try:
+        scanner = container.build_market_watch()
+    except ConfigError as exc:
+        typer.secho(f"Configuration error: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=2) from exc
+    focus = {s.upper(): ["requested"] for s in symbols or []}
+    report = scanner.scan(phase, datetime.now(zone).date(), focus)  # type: ignore[arg-type]
+    if as_json:
+        typer.echo(report.model_dump_json(indent=2))
+        return
+    typer.echo(f"{'Pre-market' if phase == 'pre' else 'After-hours'} watch, {report.day}")
+    if report.market is not None and report.market.move_pct is not None:
+        typer.echo(f"Market: {report.market.symbol} {report.market.move_pct:+.2f}%")
+    for item in report.items:
+        move = "  n/a  " if item.move_pct is None else f"{item.move_pct:+6.2f}%"
+        flag = "ALERT" if item.alert else "     "
+        tags = ", ".join(item.catalysts) or "-"
+        typer.echo(
+            f"{flag} {item.symbol:<6} {move}  {', '.join(item.reasons):<18} "
+            f"news {item.news_count:<2} {tags}"
+        )
+    for error in report.errors:
+        typer.secho(f"Warning: {error}", fg=typer.colors.YELLOW, err=True)
+
+
+@app.command()
+def plan(
+    day: Annotated[
+        str | None, typer.Option("--date", help="The session the plan is for (default: today).")
+    ] = None,
+    as_json: Annotated[bool, typer.Option("--json", help="Machine-readable output.")] = False,
+    env: EnvOption = None,
+    config_dir: ConfigDirOption = None,
+) -> None:
+    """The to-do list the last session left for a trading day (ADR 0016)."""
+    container = _container(env, config_dir)
+    store = _store_or_exit(container)
+    zone = ZoneInfo(container.config.schedule.timezone)
+    try:
+        when = date.fromisoformat(day) if day else datetime.now(zone).date()
+    except ValueError as exc:
+        typer.secho(f"Invalid date: {day}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=2) from exc
+    found = store.plan_for(when)
+    if found is None:
+        typer.echo(f"No plan for {when}.")
+        raise typer.Exit(code=1)
+    if as_json:
+        typer.echo(json.dumps(found, indent=2, default=str))
+        return
+    typer.echo(f"Plan for {when} (from {found['source_day']}): {found['summary']}")
+    for item in found["items"]:
+        typer.echo(f"  {item['priority']}  {item['kind']:<7} {item['text']}")
+
+
+@app.command()
 def costs(
     days: Annotated[int, typer.Option("--days", min=1, max=366)] = 7,
     as_json: Annotated[bool, typer.Option("--json", help="Machine-readable output.")] = False,

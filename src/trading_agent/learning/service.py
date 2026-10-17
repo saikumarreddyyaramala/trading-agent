@@ -186,6 +186,14 @@ class LearningService:
             "benchmark_spy_open_to_close_pct": None if spy is None else str(spy),
             "stopped_idea_simulation": stopped,
             "position_events": [f"{e['action']}: {e['detail']}" for e in run["position_events"]],
+            # The plan made for this day (ADR 0016): was it worth following?
+            "plan_for_today": [
+                f"[{i['kind']}] {i['text']}"
+                for i in (self._store.plan_for(day) or {}).get("items", [])
+            ],
+            "after_hours_alerts": list(post.alerts)
+            if (post := self._store.get_watch(day, "post"))
+            else [],
         }
 
     def _bars(self, symbols: list[str], day: date) -> dict[str, Any]:

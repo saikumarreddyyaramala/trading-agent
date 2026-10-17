@@ -18,6 +18,10 @@ schedule:
   # Extra analysis-and-entry slots (ADR 0015). How many run is capped by
   # risk.max_trades_per_day, so with 1 trade a day (live) they never run.
   extra_analyses: ["10:30", "12:00"]
+  # Market watch (ADR 0016): pre-market scan before the pre-flight; after-hours scan and
+  # the next-day plan once the session is over.
+  premarket_watch: "08:00"
+  post_market: "16:45"
 
 risk:
   max_trades_per_day: 1
@@ -150,3 +154,13 @@ scoring:
   min_history_trades: 10        # own closed trades needed before history counts
   history_trades: 50
   weights: {reward_risk: 20, volatility: 20, trend: 25, extension: 15, confidence: 10, history: 10}
+
+# Pre-market and after-hours watch, and the next-day plan (ADR 0016). See them with
+# `trading-agent watch` and `trading-agent plan`.
+watch:
+  enabled: true
+  gap_alert_pct: 3              # a move this big since the last regular close is an alert
+  movers: 10                    # top gainers and losers to include
+  max_symbols: 25
+  news_lookback_hours: 16
+  max_plan_items: 12

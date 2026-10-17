@@ -36,6 +36,10 @@ class ScheduleConfig(_Strict):
     # Extra analysis-and-entry slots during the session (ADR 0015). How many run is capped
     # by risk.max_trades_per_day, so live (one trade a day) never uses them.
     extra_analyses: tuple[time, ...] = ()
+    # Market watch (ADR 0016): a pre-market scan before the pre-flight, and an after-hours
+    # scan followed by the next-day plan once the session is over.
+    premarket_watch: time = time(8, 0)
+    post_market: time = time(16, 45)
 
     @field_validator("timezone")
     @classmethod
@@ -58,6 +62,10 @@ class ScheduleConfig(_Strict):
         ]
         if steps != sorted(steps):
             raise ValueError("schedule times must be in chronological order")
+        if not self.premarket_watch < self.data_collection:
+            raise ValueError("premarket_watch must come before data_collection")
+        if self.post_market < self.report:
+            raise ValueError("post_market must not come before report")
         for extra in self.extra_analyses:
             if not self.trade_window_start <= extra < self.trade_window_end:
                 raise ValueError(
@@ -216,6 +224,18 @@ class ScoringConfig(_Strict):
     weights: ScoreWeights = ScoreWeights()
 
 
+class WatchConfig(_Strict):
+    """Pre-market and after-hours watch, and the next-day plan (ADR 0016)."""
+
+    enabled: bool = True
+    # A move this big (either way) since the last regular close raises an alert.
+    gap_alert_pct: Decimal = Field(default=Decimal(3), gt=0, le=50)
+    movers: int = Field(default=10, ge=0, le=50)  # top gainers and losers to include
+    max_symbols: int = Field(default=25, ge=1, le=100)
+    news_lookback_hours: int = Field(default=16, ge=1, le=72)
+    max_plan_items: int = Field(default=12, ge=1, le=50)
+
+
 class LearningConfig(_Strict):
     """Self-learning (ADR 0013): a daily review turns results into advisory lessons."""
 
@@ -314,6 +334,7 @@ class AppConfig(_Strict):
     live: LiveConfig = LiveConfig()
     learning: LearningConfig = LearningConfig()
     scoring: ScoringConfig = ScoringConfig()
+    watch: WatchConfig = WatchConfig()
     costs: CostsConfig = CostsConfig()
 
     @model_validator(mode="after")

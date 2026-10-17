@@ -26,7 +26,7 @@ risk engine, executes on a broker, and reports the result against the S&P 500.
 | 12 | Self-learning: daily review turns results into advisory, guarded lessons | Done |
 | 13 | Cost ledger: every model call priced, daily LLM budget, failing-tests-first | Done |
 | 14 | Parametric trade score; up to 3 paper trades a day in separate slots | Done |
-| 15 | Pre-market and after-hours watch; next-day to-do list | Planned |
+| 15 | Pre-market and after-hours watch; next-day plan; morning brief | Done |
 | 16 | Guidebook, outcome-scored lessons, and playbooks | Planned |
 | 17 | Dashboard backend: live stream, news cards, costs | Planned |
 | 18 | Dashboard UI (local web app) | Planned |
@@ -57,8 +57,8 @@ Key rules (see [ADR 0001](docs/adr/0001-architecture.md), [ADR 0002](docs/adr/00
 [ADR 0007](docs/adr/0007-audit-trail.md), [ADR 0008](docs/adr/0008-daily-cycle.md),
 [ADR 0009](docs/adr/0009-daily-report.md), [ADR 0010](docs/adr/0010-critic-agent.md),
 [ADR 0011](docs/adr/0011-evaluation.md), [ADR 0012](docs/adr/0012-going-live.md),
-[ADR 0013](docs/adr/0013-self-learning.md), [ADR 0014](docs/adr/0014-cost-ledger.md), and
-[ADR 0015](docs/adr/0015-trade-score-and-slots.md)):
+[ADR 0013](docs/adr/0013-self-learning.md), [ADR 0014](docs/adr/0014-cost-ledger.md),
+[ADR 0015](docs/adr/0015-trade-score-and-slots.md), and [ADR 0016](docs/adr/0016-market-watch-and-plan.md)):
 - The AI has read-only tools; it can never place an order directly. Tool inputs are
   validated and bounded, and each session has a call budget.
 - Every model call goes through the LLM gateway (pinned model, fallback, token caps, logs).
@@ -137,6 +137,8 @@ Ready
 | `uv run trading-agent report` | Today's report (`--date`, `--json`, `--send`); saved to `reports/` |
 | `uv run trading-agent evaluate` | Score the paper record against the go/no-go bar (exit 0 = GO) |
 | `uv run trading-agent evaluate-critic` | Replay the current critic over recorded proposals (uses tokens) |
+| `uv run trading-agent watch AAPL --phase pre` | Scan pre-market (or `post`) moves, news, and catalysts now |
+| `uv run trading-agent plan` | The to-do list the last session left for today (`--date`) |
 | `uv run trading-agent costs` | What running the system cost, per day, agent, and model (`--days`, `--json`) |
 | `uv run trading-agent lessons` | What the agent has learned (`--all` includes retired ones) |
 | `uv run trading-agent retire-lesson ID --reason TEXT` | Stop the analyst from seeing a lesson |
@@ -169,6 +171,8 @@ src/trading_agent/
   evaluation/            scorecard, go/no-go criteria, counterfactuals, critic replay
   learning/              daily review: day record, lessons kept, retired, and expired
   costs/                 cost ledger: exact pricing, daily budget, summaries
+  watch/                 pre-market and after-hours scans
+  planning/              next-day plan and the analyst's morning brief
   bootstrap.py           composition root
   health.py              pre-flight checks
   cli.py                 `trading-agent` command
@@ -183,16 +187,19 @@ docs/adr/                architecture decision records
 
 | Step | When | What |
 | --- | --- | --- |
+| premarket | 08:00 | scan pre-market moves and news for the plan, positions, and movers |
 | preflight | 08:30 | health check; a failure halts new trades for the day |
-| analysis | 08:45 | the analyst researches and proposes one trade or none |
+| analysis | 08:45 | the analyst reads the morning brief, researches, and proposes one trade or none |
 | critique | after analysis | the critic reviews a buy against the evidence; it can only veto |
 | entry | 09:45 | risk check and trade score with fresh data; entry with a stop-loss if approved |
 | slot 2, 3 | 10:30, 12:00 | paper only: another analysis, critique, risk check, and entry, each its own run |
 | manage | every minute | take profit, keep the stop in place |
 | close | 15:50 | force-close and verify the account is flat (earlier on half-days) |
 | reconcile | 16:15 | sync final order statuses and fills |
-| reflect | after reconcile | review the day and update the analyst's lessons (never affects trades) |
-| report | after reflect | daily report saved to `reports/`, and sent to `REPORT_WEBHOOK_URL` if set |
+| postmarket | 16:45 | scan after-hours moves and news for today's trades and ideas |
+| reflect | after postmarket | review the day and update the analyst's lessons (never affects trades) |
+| plan | after reflect | the to-do list for the next session, from the day's facts |
+| report | after plan | daily report saved to `reports/`, and sent to `REPORT_WEBHOOK_URL` if set |
 
 Each step is recorded once, so a restarted process resumes where it left off.
 
@@ -222,6 +229,18 @@ The guardrails (ADR 0013):
 Every analysis records which lessons it used, and the daily report shows what was
 learned and retired. Review them with `trading-agent lessons`. Turn learning off with
 `learning.enabled: false`.
+
+## Market watch and the next-day plan
+
+Before the open (08:00 ET) the cycle scans what moved overnight: the symbols in
+yesterday's plan, open positions, and the top movers. For each it records the move
+from the last regular close, the news count, and the catalyst (earnings, FDA, upgrade,
+merger, and so on, by fixed rules). After the close (16:45 ET) it does the same for
+today's trades and ideas. Then it writes a to-do list for the next session, based on
+the day: stopped-out trades to review, vetoed ideas and after-hours movers to watch,
+failures to fix, and lessons to apply. The next morning the analyst gets that plan and
+the pre-market alerts as a short brief. The brief holds numbers and tags only, never
+headline text (ADR 0016).
 
 ## Trade score and trade slots
 

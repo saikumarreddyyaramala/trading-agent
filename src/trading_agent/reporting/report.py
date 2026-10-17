@@ -120,6 +120,10 @@ class DailyReport(BaseModel):
     costs: DayCost | None = None  # from the cost ledger (ADR 0014)
     unpriced_models: list[str] = []
     slots: list[SlotSummary] = []  # extra trade slots (ADR 0015)
+    premarket_alerts: list[str] = []  # market watch (ADR 0016)
+    after_hours_alerts: list[str] = []
+    plan_for: date | None = None  # the next-day plan made today
+    plan: list[str] = []
 
 
 class ReportBuilder:
@@ -240,6 +244,7 @@ class ReportBuilder:
             learning=self._learning(day, run_id, run),
             costs=costs.days[0] if costs else None,
             slots=slots,
+            **self._watch_and_plan(day, warnings),
             unpriced_models=costs.unpriced_models if costs else [],
         )
         self._log.info("report.built", day=str(day), run_id=run_id, warnings=len(warnings))
@@ -275,6 +280,21 @@ class ReportBuilder:
             output_tokens=row["output_tokens"],
             cost_usd=cost,
         )
+
+    def _watch_and_plan(self, day: date, warnings: list[str]) -> dict[str, Any]:
+        try:
+            pre = self._store.get_watch(day, "pre")
+            post = self._store.get_watch(day, "post")
+            plan = self._store.plan_from(day)
+        except AuditError as exc:
+            warnings.append(f"market watch and plan unavailable: {exc}")
+            return {}
+        return {
+            "premarket_alerts": list(pre.alerts) if pre else [],
+            "after_hours_alerts": list(post.alerts) if post else [],
+            "plan_for": plan["for_day"] if plan else None,
+            "plan": [f"[{i['kind']}] {i['text']}" for i in plan["items"]] if plan else [],
+        }
 
     def _learning(
         self, day: date, run_id: str, run: dict[str, Any] | None
@@ -478,6 +498,18 @@ def render_markdown(report: DailyReport) -> str:
             lines.append("Retired today:")
             lines += [f"- {text}" for text in learning.retired]
             lines.append("")
+
+    if report.premarket_alerts or report.after_hours_alerts:
+        lines.append("## Market watch")
+        if report.premarket_alerts:
+            lines.append(f"Pre-market: {'; '.join(report.premarket_alerts)}.")
+        if report.after_hours_alerts:
+            lines.append(f"After hours: {'; '.join(report.after_hours_alerts)}.")
+        lines.append("")
+    if report.plan_for is not None:
+        lines.append(f"## Plan for {report.plan_for:%A %Y-%m-%d}")
+        lines += [f"- {item}" for item in report.plan] or ["Nothing to follow up."]
+        lines.append("")
 
     costs = report.costs
     if costs is not None:

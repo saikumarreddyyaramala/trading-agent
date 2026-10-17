@@ -6,7 +6,7 @@ so every adapter (Alpaca, Anthropic, ...) translates into and out of them.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Any, Literal
 
@@ -109,6 +109,30 @@ class ActiveStock(_Frozen):
     symbol: str
     volume: int
     trade_count: int
+
+
+class Snapshot(_Frozen):
+    """The latest trade and the last two daily sessions of a symbol (ADR 0016).
+
+    Outside regular hours the latest trade is a pre-market or after-hours trade, which is
+    what the market watch compares against the last regular close."""
+
+    symbol: str
+    last_price: Decimal | None
+    last_trade_at: datetime | None
+    session_close: Decimal | None  # the latest daily bar (may be today's, even pre-market)
+    session_at: datetime | None
+    previous_close: Decimal | None  # the daily bar before it
+    session_volume: int | None = None
+
+
+class Mover(_Frozen):
+    """One of the day's biggest percentage gainers or losers."""
+
+    symbol: str
+    price: Decimal
+    change_pct: Decimal
+    direction: Literal["gainer", "loser"]
 
 
 class NewsArticle(_Frozen):
@@ -415,3 +439,23 @@ class Lesson(_Frozen):
     source_run_id: str | None
     created_at: datetime
     expires_at: datetime
+
+
+# ---------- The next-day plan (ADR 0016) ----------
+
+
+class PlanItem(_Frozen):
+    """One thing to do next session, derived by fixed rules from the day's facts."""
+
+    kind: Literal["watch", "review", "avoid", "ops", "apply"]
+    symbol: str | None = None
+    text: str = Field(min_length=1, max_length=500)
+    priority: int = Field(ge=1, le=3)  # 1 = first thing
+
+
+class DayPlan(_Frozen):
+    source_day: date
+    for_day: date
+    created_at: datetime
+    items: tuple[PlanItem, ...]
+    summary: str

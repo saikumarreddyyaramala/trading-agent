@@ -242,3 +242,28 @@ llm_calls = sa.Table(
     sa.Column("cost_usd", Exact),  # priced when the call happened; NULL = no price set
     sa.Column("error", sa.Text),
 )
+
+# Pre-market and after-hours scans (migration 0007, ADR 0016).
+market_watch = sa.Table(
+    "market_watch",
+    metadata,
+    sa.Column("id", sa.Integer, primary_key=True, autoincrement=True),
+    sa.Column("run_id", sa.String(64), sa.ForeignKey("runs.run_id"), index=True),
+    sa.Column("day", sa.Date, nullable=False, index=True),
+    sa.Column("phase", sa.String(8), nullable=False),  # pre | post
+    sa.Column("created_at", Timestamp, nullable=False),
+    sa.Column("report", JSONType, nullable=False),
+)
+
+# The next-day plan (migration 0007, ADR 0016).
+day_plans = sa.Table(
+    "day_plans",
+    metadata,
+    sa.Column("id", sa.Integer, primary_key=True, autoincrement=True),
+    sa.Column("source_run_id", sa.String(64), sa.ForeignKey("runs.run_id"), index=True),
+    sa.Column("source_day", sa.Date, nullable=False),
+    sa.Column("for_day", sa.Date, nullable=False, index=True),
+    sa.Column("created_at", Timestamp, nullable=False),
+    sa.Column("items", JSONType, nullable=False),
+    sa.Column("summary", sa.Text, nullable=False),
+)

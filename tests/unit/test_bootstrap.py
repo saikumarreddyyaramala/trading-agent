@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import date
 from pathlib import Path
+from typing import Any
 
 import pytest
 from pydantic import SecretStr
@@ -512,3 +513,118 @@ def test_cycle_services_pass_context_and_capacity(
     assert services.analyze("daily-1-2", "slot 2") == "result"
     assert seen == [("daily-1-2", "slot 2")]
     assert services.capacity == container.slot_capacity
+
+
+# ---------- Market watch and plan (ADR 0016) ----------
+
+
+def _watch_container(
+    config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, broker: Any = None
+) -> Container:
+    from tests.conftest import FakeNews
+    from tests.unit.test_market_watch import _pre_market
+
+    secrets = make_secrets(database_url=_learning_db(tmp_path))
+    container = Container(config=load_config("paper", config_dir), secrets=secrets)
+    market = _pre_market()
+    monkeypatch.setattr(Container, "build_market_data", lambda self: market)
+    monkeypatch.setattr(Container, "build_news", lambda self: FakeNews())
+    monkeypatch.setattr(Container, "build_broker", lambda self: broker or FakeBroker())
+    return container
+
+
+def test_premarket_scan_focuses_on_the_plan_and_positions(
+    config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from datetime import UTC, datetime
+
+    from tests.conftest import make_position
+    from trading_agent.domain.models import DayPlan, PlanItem
+
+    container = _watch_container(
+        config_dir, tmp_path, monkeypatch, broker=FakeBroker(positions=(make_position("MSFT"),))
+    )
+    store = container.build_audit_store()
+    store.record_plan(
+        None,
+        DayPlan(
+            source_day=date(2026, 10, 14),
+            for_day=date(2026, 10, 15),
+            created_at=datetime.now(UTC),
+            items=(PlanItem(kind="watch", symbol="AAPL", text="AAPL moved", priority=1),),
+            summary="1 item",
+        ),
+    )
+    detail = container.premarket(date(2026, 10, 15))
+    assert detail.startswith("scanned ")
+    report = store.get_watch(date(2026, 10, 15), "pre")
+    assert report is not None
+    reasons = {i.symbol: i.reasons for i in report.items}
+    assert reasons["AAPL"][0] == "plan"
+    assert reasons["MSFT"][0] == "held"
+
+
+def test_postmarket_scan_focuses_on_the_days_ideas(
+    config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from tests.unit.test_report import _record_trading_day
+
+    container = _watch_container(config_dir, tmp_path, monkeypatch)
+    store = container.build_audit_store()
+    _record_trading_day(store)  # AAPL proposed and traded on 2026-10-15
+    container.postmarket(date(2026, 10, 15))
+    report = store.get_watch(date(2026, 10, 15), "post")
+    assert report is not None
+    reasons = {i.symbol: i.reasons for i in report.items}
+    assert reasons["AAPL"][:2] == ("traded", "proposed")
+
+
+def test_make_plan_and_brief(
+    config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from tests.unit.test_report import _record_trading_day
+
+    container = _watch_container(config_dir, tmp_path, monkeypatch)
+    _record_trading_day(container.build_audit_store())
+    detail = container.make_plan(date(2026, 10, 15))
+    assert detail.startswith("1 item(s) for ")
+    assert container.brief(date(2026, 10, 15)) is None  # the plan is for the next session
+
+
+def test_watch_and_plan_need_a_database(config_dir: Path) -> None:
+    container = Container(config=load_config("paper", config_dir), secrets=make_secrets())
+    assert container.make_plan(date(2026, 10, 15)).startswith("skipped: no database")
+    assert container.brief(date(2026, 10, 15)) is None
+
+
+def test_cycle_services_include_watch_plan_and_brief(config_dir: Path) -> None:
+    container = Container(config=load_config("paper", config_dir), secrets=make_secrets())
+    services = container.build_cycle_services()
+    assert services.premarket == container.premarket
+    assert services.postmarket == container.postmarket
+    assert services.plan == container.make_plan
+    assert services.brief == container.brief
+
+
+def test_scans_survive_a_broker_outage(
+    config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    container = _watch_container(
+        config_dir, tmp_path, monkeypatch, broker=FakeBroker(fail_positions=True)
+    )
+    assert container.premarket(date(2026, 10, 15)).startswith("scanned ")
+    assert container.postmarket(date(2026, 10, 15)).startswith("scanned ")
+
+
+def test_plan_uses_the_brokers_calendar(
+    config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from tests.unit.test_report import _record_trading_day
+
+    container = _watch_container(config_dir, tmp_path, monkeypatch)
+    store = container.build_audit_store()
+    _record_trading_day(store)
+    container.make_plan(date(2026, 10, 15))
+    plan = store.plan_from(date(2026, 10, 15))
+    assert plan is not None
+    assert plan["for_day"] > date(2026, 10, 15)
