@@ -98,9 +98,6 @@ reporting:
   benchmark_symbol: SPY       # trades are compared with its open-to-close move that day
   output_dir: reports         # one Markdown and one JSON file per day
   history_days: 365           # window for the performance-to-date section
-  # Set your actual LLM prices to see cost in dollars; left unset, only tokens are shown.
-  llm_usd_per_million_input_tokens: null
-  llm_usd_per_million_output_tokens: null
 
 # Go/no-go bar for live trading (ADR 0011), fixed in advance. `trading-agent evaluate`
 # scores the paper record against it. Every criterion must pass; missing data is a fail.
@@ -112,7 +109,7 @@ evaluation:
   min_excess_ci_lower_pct: -0.5  # lower end of the 90% bootstrap interval of that mean
   max_drawdown_usd: 15           # half of the $30 cushion above the $70 equity floor
   max_error_day_pct: 5
-  max_llm_cost_per_day_usd: 1.00 # needs reporting.llm_usd_per_million_* to be set
+  max_llm_cost_per_day_usd: 1.00 # needs costs.llm_prices for every model used
   bootstrap_samples: 5000
 
 # Self-learning (ADR 0013): after each day a reviewer turns results into short lessons the
@@ -123,3 +120,16 @@ learning:
   max_active: 15              # older lessons are retired when newer ones arrive
   lesson_ttl_days: 60         # a lesson expires unless it is learned again
   repair_attempts: 1
+
+# What running the system costs (ADR 0014). See it with `trading-agent costs`. Nothing is
+# guessed: a model with no price shows tokens only, and totals that include it are unknown.
+costs:
+  # USD per million tokens, from your provider's price page. Example:
+  #   gpt-6.1-sol: {input: 2.50, output: 10.00}
+  llm_prices: {}
+  # Paid subscriptions, spread over every calendar day.
+  services:
+    - name: Alpaca paper trading and market data (free plan)
+      monthly_usd: 0
+  # New LLM calls are refused once today's priced spend reaches this (needs llm_prices).
+  daily_llm_budget_usd: 2.00

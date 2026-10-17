@@ -26,6 +26,7 @@ trading-agent = "trading_agent.cli:app"
 
 [dependency-groups]
 dev = [
+    "hypothesis>=6.100",
     "mypy>=1.13",
     "pre-commit>=4.0",
     "pytest>=8.3",

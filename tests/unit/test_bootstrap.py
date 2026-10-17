@@ -361,3 +361,56 @@ def test_cycle_services_reflect_only_when_learning_is_enabled(config_dir: Path) 
     _disable_learning(config_dir)
     container = Container(config=load_config("paper", config_dir), secrets=make_secrets())
     assert container.build_cycle_services().reflect is None
+
+
+# ---------- Cost ledger (ADR 0014) ----------
+
+
+def test_every_gateway_records_to_the_ledger_and_obeys_the_budget(
+    config_dir: Path, tmp_path: Path
+) -> None:
+    from datetime import UTC, datetime
+    from decimal import Decimal
+
+    from trading_agent.costs import CostLedger
+
+    (config_dir / "paper.yaml").write_text(
+        "environment: paper\nbroker:\n  paper: true\n"
+        "costs:\n  llm_prices:\n    gpt-6.1-sol: {input: 1, output: 1}\n"
+        "  daily_llm_budget_usd: 0.50\n",
+        encoding="utf-8",
+    )
+    secrets = make_secrets(database_url=_learning_db(tmp_path))
+    container = Container(config=load_config("paper", config_dir), secrets=secrets)
+    gateway = container.build_llm_gateway()
+    assert isinstance(gateway._listener.__self__, CostLedger)  # type: ignore[union-attr]
+    assert gateway._budget is not None
+    assert gateway._budget() is None
+
+    store = container.build_audit_store()
+    from trading_agent.domain.models import LLMCallRecord, LLMUsage
+
+    store.record_llm_call(
+        LLMCallRecord(
+            created_at=datetime.now(UTC),
+            provider="openai",
+            model="gpt-6.1-sol",
+            agent="analyst",
+            run_id=None,
+            status="ok",
+            usage=LLMUsage(input_tokens=1, output_tokens=1),
+            latency_ms=1.0,
+        ),
+        Decimal("0.50"),
+    )
+    reason = container.build_llm_gateway()._budget()  # type: ignore[misc]
+    assert reason is not None
+    assert "budget of $0.50 reached" in reason
+
+
+def test_cost_report_from_the_container(config_dir: Path, tmp_path: Path) -> None:
+    secrets = make_secrets(database_url=_learning_db(tmp_path))
+    container = Container(config=load_config("paper", config_dir), secrets=secrets)
+    report = container.cost_report(days=3)
+    assert len(report.days) == 3
+    assert report.total.calls == 0

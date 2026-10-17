@@ -14,6 +14,7 @@ from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel, ConfigDict
 
+from trading_agent.costs.summary import DayCost, cost_report, usd
 from trading_agent.domain.models import Bar
 from trading_agent.domain.ports import BrokerPort, MarketDataPort
 from trading_agent.observability.logging import get_logger
@@ -80,13 +81,14 @@ class LearningSummary(BaseModel):
 
 
 class LlmTotals(BaseModel):
+    """Tokens to date. Dollars come from the cost ledger (`costs`), never from a guess."""
+
     model_config = ConfigDict(frozen=True)
 
     analyses: int
     critiques: int = 0
     input_tokens: int
     output_tokens: int
-    cost_usd: Decimal | None
 
 
 class DailyReport(BaseModel):
@@ -112,6 +114,8 @@ class DailyReport(BaseModel):
     llm: LlmTotals
     warnings: list[str]
     learning: LearningSummary | None = None
+    costs: DayCost | None = None  # from the cost ledger (ADR 0014)
+    unpriced_models: list[str] = []
 
 
 class ReportBuilder:
@@ -133,16 +137,6 @@ class ReportBuilder:
         self._zone = ZoneInfo(config.schedule.timezone)
         self._clock = clock or (lambda: datetime.now(UTC))
         self._log = logger or get_logger(__name__)
-
-    def _cost(self, input_tokens: int, output_tokens: int) -> Decimal | None:
-        prices = (
-            self._settings.llm_usd_per_million_input_tokens,
-            self._settings.llm_usd_per_million_output_tokens,
-        )
-        if prices[0] is None or prices[1] is None:
-            return None
-        total = (input_tokens * prices[0] + output_tokens * prices[1]) / 1_000_000
-        return total.quantize(Decimal("0.0001"))
 
     def build(self, day: date) -> DailyReport:
         run_id = f"{SYSTEM_RUN_PREFIX}{day:%Y%m%d}"
@@ -187,6 +181,14 @@ class ReportBuilder:
             equity = None
             warnings.append(f"account unavailable: {exc}")
 
+        ledger: list[dict[str, Any]] | None
+        try:
+            ledger = self._store.llm_calls_between(day_end - timedelta(days=1), day_end)
+        except AuditError as exc:
+            ledger = None
+            warnings.append(f"cost ledger unavailable: {exc}")
+        costs = None if ledger is None else cost_report(ledger, self._config, day, day)
+
         try:
             totals = self._store.analysis_totals(SYSTEM_RUN_PREFIX)
         except AuditError:
@@ -204,7 +206,7 @@ class ReportBuilder:
             cycle_status=run["run"]["status"] if run else None,
             cycle_summary=run["run"]["summary"] if run else None,
             steps={s["step"]: s["status"] for s in run["steps"]} if run else {},
-            analysis=self._analysis(run),
+            analysis=self._analysis(run, ledger or []),
             critic=self._critic(run),
             risk=self._risk(run),
             trade=today,
@@ -219,18 +221,27 @@ class ReportBuilder:
                 critiques=totals.get("critiques", 0),
                 input_tokens=totals["input_tokens"],
                 output_tokens=totals["output_tokens"],
-                cost_usd=self._cost(totals["input_tokens"], totals["output_tokens"]),
             ),
             warnings=warnings,
             learning=self._learning(day, run_id, run),
+            costs=costs.days[0] if costs else None,
+            unpriced_models=costs.unpriced_models if costs else [],
         )
         self._log.info("report.built", day=str(day), run_id=run_id, warnings=len(warnings))
         return report
 
-    def _analysis(self, run: dict[str, Any] | None) -> AnalysisSummary | None:
+    def _analysis(
+        self, run: dict[str, Any] | None, ledger: list[dict[str, Any]]
+    ) -> AnalysisSummary | None:
         if not run or not run["analysis"]:
             return None
         row = run["analysis"]
+        calls = [r for r in ledger if r["run_id"] == row["run_id"] and r["agent"] == "analyst"]
+        cost = (
+            sum((r["cost_usd"] for r in calls), Decimal(0))
+            if calls and all(r["cost_usd"] is not None for r in calls)
+            else None
+        )
         proposal = row["proposal"] or {}
         return AnalysisSummary(
             status=row["status"],
@@ -247,7 +258,7 @@ class ReportBuilder:
             tool_calls=len(run["tool_calls"]),
             input_tokens=row["input_tokens"],
             output_tokens=row["output_tokens"],
-            cost_usd=self._cost(row["input_tokens"], row["output_tokens"]),
+            cost_usd=cost,
         )
 
     def _learning(
@@ -429,6 +440,27 @@ def render_markdown(report: DailyReport) -> str:
             lines += [f"- {text}" for text in learning.retired]
             lines.append("")
 
+    costs = report.costs
+    if costs is not None:
+        agents = ", ".join(
+            f"{name} {usd(cost.usd, cost.known_usd)}" for name, cost in costs.by_agent.items()
+        )
+        tokens = costs.input_tokens + costs.output_tokens
+        lines += [
+            "## Costs today",
+            f"LLM {usd(costs.llm_usd, costs.known_llm_usd)}"
+            + (f" ({agents}; {costs.calls} calls, {tokens:,} tokens)" if costs.calls else "")
+            + f". Services {usd(costs.services_usd)}. "
+            f"Total {usd(costs.total_usd, costs.known_llm_usd + costs.services_usd)}.",
+            "",
+        ]
+        if report.unpriced_models:
+            lines += [
+                f"No price set for {', '.join(report.unpriced_models)}: add it under "
+                "costs.llm_prices to see its cost.",
+                "",
+            ]
+
     perf = report.performance
     lines += [
         "## Performance to date (system trades only)",
@@ -440,8 +472,8 @@ def render_markdown(report: DailyReport) -> str:
         f"| {_money(perf.total_pnl_usd)} | {_signed(perf.avg_return_pct)} "
         f"| {_signed(perf.avg_benchmark_pct)} | {_signed(perf.avg_excess_pct, ' pts')} |",
         "",
-        f"LLM usage: {report.llm.analyses} analyses, {report.llm.critiques} critiques, "
-        f"{_tokens(report.llm.input_tokens, report.llm.output_tokens, report.llm.cost_usd)}.",
+        f"LLM usage to date: {report.llm.analyses} analyses, {report.llm.critiques} critiques, "
+        f"{_tokens(report.llm.input_tokens, report.llm.output_tokens, None)}.",
         "",
         f"Account equity: {_money(report.account_equity)} ({report.environment}).",
         "",

@@ -215,6 +215,20 @@ class LLMUsage(_Frozen):
     output_tokens: int = 0
 
 
+class LLMCallRecord(_Frozen):
+    """One attempt at a model call, for the cost ledger (ADR 0014). Failed attempts count."""
+
+    created_at: datetime
+    provider: str
+    model: str
+    agent: str  # analyst | critic | reflector | ... ; "other" when untagged
+    run_id: str | None
+    status: Literal["ok", "error"]
+    usage: LLMUsage
+    latency_ms: float | None
+    error: str | None = None
+
+
 class LLMResponse(_Frozen):
     text: str
     provider: str

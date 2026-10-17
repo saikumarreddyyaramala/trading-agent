@@ -219,7 +219,7 @@ def _check_llm(gateway: LLMGateway) -> CheckResult:
         messages=(ChatMessage(role="user", content="Reply with the single word: OK"),),
         # Reasoning models spend hidden tokens before answering, so leave headroom.
         max_tokens=512,
-        tags={"purpose": "healthcheck"},
+        tags={"purpose": "healthcheck", "agent": "healthcheck"},
     )
     try:
         response = gateway.complete(request)
@@ -233,6 +233,41 @@ def _check_llm(gateway: LLMGateway) -> CheckResult:
         "LLM",
         CheckStatus.PASS,
         f"{response.model} replied in {response.latency_ms:.0f} ms",
+    )
+
+
+def _check_pricing(config: AppConfig) -> CheckResult:
+    """Every model the system may call should have a price, or its cost is unknown."""
+    from trading_agent.costs.pricing import price_for, service_cost_per_day
+
+    costs = config.costs
+    models = [config.llm.model]
+    if config.llm.fallback_model:
+        models.append(config.llm.fallback_model)
+    if config.critic.enabled and config.critic.model:
+        models.append(config.critic.model)
+    models = list(dict.fromkeys(models))
+    missing = [m for m in models if price_for(costs.llm_prices, m) is None]
+    budget = (
+        "no daily budget"
+        if costs.daily_llm_budget_usd is None
+        else f"budget ${costs.daily_llm_budget_usd:.2f}/day"
+    )
+    services = f"services ${service_cost_per_day(costs.services):.2f}/day"
+    if missing:
+        return CheckResult(
+            "LLM pricing",
+            CheckStatus.WARN,
+            f"no price for {', '.join(missing)} in costs.llm_prices: their cost shows as "
+            f"tokens only and the budget cannot count it; {budget}; {services}",
+        )
+    price = price_for(costs.llm_prices, config.llm.model)
+    assert price is not None  # noqa: S101 - every model was just checked
+    return CheckResult(
+        "LLM pricing",
+        CheckStatus.PASS,
+        f"{config.llm.model} ${price.input:.2f}/${price.output:.2f} per 1M tokens in/out; "
+        f"{budget}; {services}",
     )
 
 
@@ -297,6 +332,8 @@ def run_healthchecks(
             results.append(CheckResult("LLM", CheckStatus.FAIL, str(exc)))
         else:
             results.append(_check_llm(gateway))
+
+    results.append(_check_pricing(config))
 
     if live_checks is not None:
         results.extend(live_checks())  # real-money gates: any FAIL blocks new trades

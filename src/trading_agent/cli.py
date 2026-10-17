@@ -19,6 +19,7 @@ from trading_agent import __version__
 from trading_agent.agents.analyst import AnalystResult
 from trading_agent.agents.critic import CriticResult
 from trading_agent.bootstrap import Container
+from trading_agent.costs import render_costs
 from trading_agent.data.errors import MarketDataError
 from trading_agent.domain.models import Evidence, RiskDecision, SymbolData, TradeProposal
 from trading_agent.evaluation.replay import replay_critic
@@ -776,6 +777,20 @@ def critique(
     else:
         _print_critique(result)
     raise typer.Exit(code=1 if result.status == "failed" else 0)
+
+
+@app.command()
+def costs(
+    days: Annotated[int, typer.Option("--days", min=1, max=366)] = 7,
+    as_json: Annotated[bool, typer.Option("--json", help="Machine-readable output.")] = False,
+    env: EnvOption = None,
+    config_dir: ConfigDirOption = None,
+) -> None:
+    """What running the system cost: every model call, per day and agent, plus services."""
+    container = _container(env, config_dir)
+    store = _store_or_exit(container)
+    report = container.cost_report(days, store)
+    typer.echo(report.model_dump_json(indent=2) if as_json else render_costs(report))
 
 
 @app.command()

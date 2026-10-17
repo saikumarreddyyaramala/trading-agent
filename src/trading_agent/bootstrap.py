@@ -7,15 +7,17 @@ testable with fakes and lets us swap vendors through config.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import anyio
 
 from trading_agent.agents.analyst import AnalystAgent, ToolCallRecord
 from trading_agent.agents.critic import CriticAgent, CriticResult
 from trading_agent.agents.reflection import Reflector
+from trading_agent.costs import CostLedger, CostReport, cost_report
 from trading_agent.data.alpaca_market_data import AlpacaMarketData
 from trading_agent.data.alpaca_news import AlpacaNews
 from trading_agent.data.collector import MarketDataCollector
@@ -309,4 +311,19 @@ class Container:
                 timeout_seconds=llm.timeout_seconds,
                 max_retries=llm.max_retries,
             )
-        return LLMGateway(provider, llm)
+        ledger = self.build_cost_ledger()
+        return LLMGateway(provider, llm, listener=ledger.record, budget=ledger.budget_reason)
+
+    def build_cost_ledger(self) -> CostLedger:
+        """Prices and records every model call; refuses calls over the daily budget."""
+        return CostLedger(self.build_recorder(), self.config)
+
+    def cost_report(self, days: int, store: AuditStore | None = None) -> CostReport:
+        """Costs for the last `days` calendar days, today included, in market time."""
+        zone = ZoneInfo(self.config.schedule.timezone)
+        end = datetime.now(zone).date()
+        start = end - timedelta(days=days - 1)
+        begin = datetime.combine(start, time(0), tzinfo=zone)
+        finish = datetime.combine(end + timedelta(days=1), time(0), tzinfo=zone)
+        rows = (store or self.build_audit_store()).llm_calls_between(begin, finish)
+        return cost_report(rows, self.config, start, end)

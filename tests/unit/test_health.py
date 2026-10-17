@@ -332,3 +332,53 @@ def test_live_gates_join_the_health_check(paper: AppConfig) -> None:
     )
     assert results[-1] == gate
     assert not overall_ok(results)  # a failed gate fails pre-flight: no trading that day
+
+
+# ---------- LLM pricing (ADR 0014) ----------
+
+
+def _pricing(config: AppConfig) -> CheckResult:
+    return next(r for r in _run(config) if r.name == "LLM pricing")
+
+
+def test_missing_prices_warn_but_never_block() -> None:
+    result = _pricing(AppConfig())
+    assert result.status is CheckStatus.WARN
+    assert "no price for gpt-6.1-sol in costs.llm_prices" in result.detail
+    assert "tokens only" in result.detail
+
+
+def test_priced_models_pass_with_the_budget() -> None:
+    config = AppConfig.model_validate(
+        {
+            "costs": {
+                "llm_prices": {
+                    "gpt-6.1-sol": {"input": "2.5", "output": "10"},
+                    "gpt-6-luna": {"input": "1", "output": "4"},
+                },
+                "services": [{"name": "Data", "monthly_usd": "30.4167"}],
+            }
+        }
+    )
+    result = _pricing(config)
+    assert result.status is CheckStatus.PASS
+    assert result.detail == (
+        "gpt-6.1-sol $2.50/$10.00 per 1M tokens in/out; budget $2.00/day; services $1.00/day"
+    )
+
+
+def test_critic_model_needs_a_price_too() -> None:
+    config = AppConfig.model_validate(
+        {
+            "llm": {"fallback_model": None},
+            "critic": {"model": "judge"},
+            "costs": {
+                "llm_prices": {"gpt-6.1-sol": {"input": "1", "output": "1"}},
+                "daily_llm_budget_usd": None,
+            },
+        }
+    )
+    result = _pricing(config)
+    assert result.status is CheckStatus.WARN
+    assert "no price for judge" in result.detail
+    assert "no daily budget" in result.detail

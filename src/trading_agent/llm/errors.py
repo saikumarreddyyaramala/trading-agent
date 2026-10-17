@@ -23,3 +23,7 @@ class LLMProviderError(LLMError):
 
 class LLMUnavailableError(LLMError):
     """Every configured model failed. Callers must treat this as 'no decision' (fail safe)."""
+
+
+class LLMBudgetExceededError(LLMError):
+    """The daily LLM budget is spent (ADR 0014). No call was made; callers fail safe."""

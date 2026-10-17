@@ -615,3 +615,78 @@ def test_null_store_has_no_lessons() -> None:
     assert store.active_lessons(NOW, 5) == []
     assert not store.retire_lesson(1, "x")
     assert store.list_lessons(include_retired=True) == []
+
+
+# ---------- LLM cost ledger (ADR 0014) ----------
+
+
+def _llm_call(run_id: str | None = "r1", at: datetime = NOW, **changes: Any) -> Any:
+    from trading_agent.domain.models import LLMCallRecord
+
+    values: dict[str, Any] = {
+        "created_at": at,
+        "provider": "openai",
+        "model": "gpt-6.1-sol",
+        "agent": "analyst",
+        "run_id": run_id,
+        "status": "ok",
+        "usage": LLMUsage(input_tokens=1200, output_tokens=300),
+        "latency_ms": 850.5,
+    }
+    values.update(changes)
+    return LLMCallRecord(**values)
+
+
+def test_llm_calls_round_trip_with_exact_costs(db_engine: sa.Engine) -> None:
+    store = _store(db_engine)
+    store.start_run("r1", "daily")
+    store.record_llm_call(_llm_call(), Decimal("0.006000"))
+    store.record_llm_call(_llm_call(run_id="unknown-run", model="mystery"), None)
+    store.record_llm_call(
+        _llm_call(status="error", usage=LLMUsage(), latency_ms=None, error="timeout"),
+        Decimal("0"),
+    )
+    rows = store.llm_calls_between(NOW - timedelta(hours=1), NOW + timedelta(hours=1))
+    assert [(r["run_id"], r["model"], r["status"]) for r in rows] == [
+        ("r1", "gpt-6.1-sol", "ok"),
+        (None, "mystery", "ok"),  # unknown runs are kept without the link
+        ("r1", "gpt-6.1-sol", "error"),
+    ]
+    assert rows[0]["cost_usd"] == Decimal("0.006")
+    assert rows[0]["input_tokens"] == 1200
+    assert rows[0]["latency_ms"] == 850.5
+    assert rows[1]["cost_usd"] is None
+    assert rows[2]["error"] == "timeout"
+
+
+def test_llm_calls_between_is_half_open(db_engine: sa.Engine) -> None:
+    store = _store(db_engine)
+    store.record_llm_call(_llm_call(run_id=None, at=NOW), Decimal("1"))
+    assert len(store.llm_calls_between(NOW, NOW + timedelta(seconds=1))) == 1
+    assert store.llm_calls_between(NOW - timedelta(seconds=1), NOW) == []
+
+
+def test_many_llm_calls_sum_exactly(db_engine: sa.Engine) -> None:
+    # A stress test: hundreds of tiny costs must add up to the cent, with no float drift.
+    store = _store(db_engine)
+    for i in range(300):
+        store.record_llm_call(
+            _llm_call(run_id=None, at=NOW + timedelta(seconds=i)), Decimal("0.000123")
+        )
+    rows = store.llm_calls_between(NOW, NOW + timedelta(hours=1))
+    assert len(rows) == 300
+    assert sum(r["cost_usd"] for r in rows) == Decimal("0.036900")
+
+
+def test_llm_ledger_on_unmigrated_database_raises(tmp_path: Any) -> None:
+    store = _store(sa.create_engine(f"sqlite:///{tmp_path / 'empty.db'}"))
+    with pytest.raises(AuditError, match="could not record llm call"):
+        store.record_llm_call(_llm_call(), None)
+    with pytest.raises(AuditError, match="could not read llm calls"):
+        store.llm_calls_between(NOW, NOW)
+
+
+def test_null_store_has_no_llm_calls() -> None:
+    store = NullAuditStore()
+    store.record_llm_call(_llm_call(), None)
+    assert store.llm_calls_between(NOW, NOW + timedelta(days=1)) == []

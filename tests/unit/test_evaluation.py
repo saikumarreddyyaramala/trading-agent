@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, date, datetime, time
+from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -131,6 +131,21 @@ def _at(day: date, hour: int, minute: int = 0) -> datetime:
     return datetime.combine(day, time(hour, minute), tzinfo=NY)
 
 
+def _ledger_call(run_id: str | None, at: datetime) -> Any:
+    from trading_agent.domain.models import LLMCallRecord
+
+    return LLMCallRecord(
+        created_at=at,
+        provider="openai",
+        model="gpt-6.1-sol",
+        agent="analyst",
+        run_id=run_id,
+        status="ok",
+        usage=LLMUsage(input_tokens=1_000_000, output_tokens=100_000),
+        latency_ms=1.0,
+    )
+
+
 def _record_day(
     store: SqlAuditStore,
     day: date,
@@ -139,6 +154,7 @@ def _record_day(
     exit_price: str = "102",
     status: str | None = None,
     with_outputs: bool = True,
+    priced: bool = True,
 ) -> str:
     run_id = f"daily-{day:%Y%m%d}"
     store.start_run(run_id, "daily")
@@ -171,6 +187,10 @@ def _record_day(
             started_at=_at(day, 8, 45),
             duration_seconds=1,
         )
+    )
+    store.record_llm_call(
+        _ledger_call(run_id, _at(day, 8, 46)),
+        D_("0.20") if priced else None,  # 1M x $0.10/M + 0.1M x $1/M
     )
     if kind in ("traded", "rejected", "vetoed"):
         critic_status = "vetoed" if kind == "vetoed" else "approved"
@@ -264,10 +284,7 @@ def _config(**evaluation: Any) -> AppConfig:
     return AppConfig.model_validate(
         {
             "evaluation": {"min_cycle_days": 5, "min_closed_trades": 2, **evaluation},
-            "reporting": {
-                "llm_usd_per_million_input_tokens": "0.10",
-                "llm_usd_per_million_output_tokens": "1.00",
-            },
+            "costs": {"llm_prices": {"gpt-6.1-sol": {"input": "0.10", "output": "1.00"}}},
         }
     )
 
@@ -320,13 +337,55 @@ def test_counterfactuals_show_what_the_gates_stopped(store: SqlAuditStore) -> No
     assert (risk.gate, risk.mean_return_pct, risk.would_have_won) == ("risk engine", D_("10.00"), 1)
 
 
-def test_cost_from_recorded_tokens(store: SqlAuditStore) -> None:
+def test_cost_comes_from_the_ledger(store: SqlAuditStore) -> None:
     _history(store)
+    # A manual `analyze` run in the same window is not part of the daily system's cost.
+    store.record_llm_call(_ledger_call(None, _at(D[1], 12)), D_("9.99"))
     cost = _builder(store).build(D[0], D[4]).cost
-    assert (cost.analyses, cost.critiques) == (5, 4)
+    assert (cost.analyses, cost.critiques, cost.calls) == (5, 4, 5)
     assert cost.input_tokens == 5_000_000
-    assert cost.total_usd == D_("1.00")  # 5M x $0.10/M + 0.5M x $1/M
+    assert cost.total_usd == D_("1.00")
     assert cost.per_cycle_day_usd == D_("0.20")
+    assert cost.unknown_reason is None
+
+
+def test_unpriced_calls_make_the_cost_unknown(store: SqlAuditStore) -> None:
+    _history(store)
+    _record_day(store, D[4] + timedelta(days=3), "no_trade", priced=False)
+    card = _builder(store).build(D[0], D[4] + timedelta(days=3))
+    assert card.cost.total_usd is None
+    assert card.cost.unknown_reason == "no price for gpt-6.1-sol (costs.llm_prices)"
+    criterion = next(c for c in card.criteria if c.name == "LLM cost per cycle day")
+    assert criterion.passed is None
+    assert criterion.actual == "unknown: no price for gpt-6.1-sol (costs.llm_prices)"
+    assert "Dollars unknown: no price for gpt-6.1-sol" in render_scorecard(card)
+
+
+def test_analyses_from_before_the_ledger_have_unknown_cost(store: SqlAuditStore) -> None:
+    run_id = _record_day(store, D[0], "no_trade")
+    with store._engine.begin() as connection:  # simulate history recorded before Phase 13
+        from trading_agent.storage import schema
+
+        connection.execute(schema.llm_calls.delete())
+    cost = _builder(store).build(D[0], D[0]).cost
+    assert run_id
+    assert cost.total_usd is None
+    assert cost.input_tokens == 1_000_000  # still shown, from the analyses
+    assert cost.unknown_reason == "no cost records for 1 analyses (recorded before the ledger)"
+
+
+def test_unreadable_ledger_is_a_warning(store: SqlAuditStore) -> None:
+    from trading_agent.storage.store import AuditError
+
+    _history(store)
+
+    def down(start: Any, end: Any) -> Any:
+        raise AuditError("ledger down")
+
+    store.llm_calls_between = down  # type: ignore[method-assign]
+    card = _builder(store).build(D[0], D[4])
+    assert "cost ledger unavailable: ledger down" in card.warnings
+    assert card.cost.total_usd is None
 
 
 def test_a_record_meeting_every_bar_is_a_go(store: SqlAuditStore) -> None:
@@ -363,7 +422,7 @@ def test_unknown_values_are_failures_not_passes(store: SqlAuditStore) -> None:
     assert "Win rate" in unknown
     assert "LLM cost per cycle day" in unknown
     cost = next(c for c in card.criteria if c.name == "LLM cost per cycle day")
-    assert cost.actual.startswith("unknown: set reporting.llm_usd_per_million_*")
+    assert cost.actual == "unknown: no cost records in this window"
 
 
 def test_cost_criterion_can_be_removed(store: SqlAuditStore) -> None:
@@ -436,7 +495,7 @@ def test_empty_scorecard_markdown() -> None:
     markdown = render_scorecard(_builder(NullAuditStore(), AppConfig()).build(D[0], D[0]))
     assert "## Decision: **NO-GO**" in markdown
     assert "FAIL (no data)" in markdown
-    assert "Set LLM prices in config to see dollars." in markdown
+    assert "Dollars unknown: no cost records in this window." in markdown
     assert "Critic: no reviews." in markdown
 
 

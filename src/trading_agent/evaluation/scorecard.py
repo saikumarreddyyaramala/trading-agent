@@ -93,6 +93,8 @@ class Cost(BaseModel):
     output_tokens: int
     total_usd: Decimal | None
     per_cycle_day_usd: Decimal | None
+    calls: int = 0  # model calls in the cost ledger (daily runs only)
+    unknown_reason: str | None = None  # why total_usd is None
 
 
 class Criterion(BaseModel):
@@ -189,7 +191,16 @@ class ScorecardBuilder:
         funnel = self._funnel(days, reports, len(trades))
         performance = self._performance(trades, bars)
         counterfactuals = self._counterfactuals(stopped, bars)
-        cost = self._cost(reports, funnel.cycle_days)
+        try:
+            ledger = [
+                row
+                for row in self._store.llm_calls_between(window_start, window_end)
+                if (row["run_id"] or "").startswith(SYSTEM_RUN_PREFIX)
+            ]
+        except AuditError as exc:
+            ledger = None
+            warnings.append(f"cost ledger unavailable: {exc}")
+        cost = self._cost(reports, ledger, funnel.cycle_days)
         criteria = self._criteria(funnel, performance, cost)
         decision: Literal["GO", "NO-GO"] = (
             "GO" if criteria and all(c.passed is True for c in criteria) else "NO-GO"
@@ -366,23 +377,43 @@ class ScorecardBuilder:
             )
         return results
 
-    def _cost(self, reports: list[dict[str, Any]], cycle_days: int) -> Cost:
+    def _cost(
+        self,
+        reports: list[dict[str, Any]],
+        ledger: list[dict[str, Any]] | None,
+        cycle_days: int,
+    ) -> Cost:
+        """Dollars come only from the cost ledger, priced when each call happened."""
         analyses = [r["analysis"] for r in reports if r["analysis"]]
         critiques = [r["critique"] for r in reports if r.get("critique")]
-        inputs = sum(a["input_tokens"] for a in analyses) + sum(
-            c["input_tokens"] for c in critiques
-        )
-        outputs = sum(a["output_tokens"] for a in analyses) + sum(
-            c["output_tokens"] for c in critiques
-        )
-        settings = self._config.reporting
-        price_in = settings.llm_usd_per_million_input_tokens
-        price_out = settings.llm_usd_per_million_output_tokens
-        total = None
-        if price_in is not None and price_out is not None:
-            total = ((inputs * price_in + outputs * price_out) / 1_000_000).quantize(
-                Decimal("0.01")
+        rows = ledger or []
+        if rows:
+            inputs = sum(r["input_tokens"] for r in rows)
+            outputs = sum(r["output_tokens"] for r in rows)
+        else:  # history from before the ledger: tokens are known, dollars are not
+            inputs = sum(a["input_tokens"] for a in analyses) + sum(
+                c["input_tokens"] for c in critiques
             )
+            outputs = sum(a["output_tokens"] for a in analyses) + sum(
+                c["output_tokens"] for c in critiques
+            )
+
+        unpriced = sorted({r["model"] for r in rows if r["cost_usd"] is None})
+        logged_runs = {r["run_id"] for r in rows}
+        unlogged = [a for a in analyses if a["run_id"] not in logged_runs]
+        reason: str | None = None
+        if ledger is None:
+            reason = "the cost ledger could not be read"
+        elif unpriced:
+            reason = f"no price for {', '.join(unpriced)} (costs.llm_prices)"
+        elif unlogged:
+            reason = f"no cost records for {len(unlogged)} analyses (recorded before the ledger)"
+        elif not rows:
+            reason = "no cost records in this window"
+
+        total = None
+        if reason is None:
+            total = sum((r["cost_usd"] for r in rows), Decimal(0)).quantize(Decimal("0.01"))
         return Cost(
             analyses=len(analyses),
             critiques=len(critiques),
@@ -392,6 +423,8 @@ class ScorecardBuilder:
             per_cycle_day_usd=(total / cycle_days).quantize(Decimal("0.01"))
             if total is not None and cycle_days
             else None,
+            calls=len(rows),
+            unknown_reason=reason,
         )
 
     def _criteria(self, funnel: Funnel, perf: Performance, cost: Cost) -> list[Criterion]:
@@ -458,7 +491,7 @@ class ScorecardBuilder:
                 Criterion(
                     name="LLM cost per cycle day",
                     threshold=f"<= ${bar.max_llm_cost_per_day_usd:.2f}",
-                    actual="unknown: set reporting.llm_usd_per_million_* prices"
+                    actual=f"unknown: {cost.unknown_reason or 'no cycle days'}"
                     if cost.per_cycle_day_usd is None
                     else f"${cost.per_cycle_day_usd}",
                     passed=None
@@ -543,7 +576,7 @@ def render_scorecard(card: Scorecard) -> str:
         + (
             f" (${c.total_usd}, ${c.per_cycle_day_usd} per cycle day)."
             if c.total_usd is not None
-            else ". Set LLM prices in config to see dollars."
+            else f". Dollars unknown: {c.unknown_reason}."
         ),
         "",
     ]

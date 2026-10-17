@@ -163,7 +163,7 @@ class EvaluationConfig(_Strict):
     min_excess_ci_lower_pct: Decimal = Decimal("-0.5")
     max_drawdown_usd: Decimal = Field(default=Decimal("15"), gt=0)
     max_error_day_pct: Decimal = Field(default=Decimal("5"), ge=0, le=100)
-    # Needs reporting.llm_usd_per_million_* prices. None removes this criterion.
+    # Needs costs.llm_prices for every model used. None removes this criterion.
     max_llm_cost_per_day_usd: Decimal | None = Field(default=Decimal("1.00"), gt=0)
     bootstrap_samples: int = Field(default=5000, ge=500, le=100_000)
 
@@ -178,6 +178,36 @@ class LearningConfig(_Strict):
     # Markets change: a lesson expires unless re-learned.
     lesson_ttl_days: int = Field(default=60, ge=5, le=365)
     repair_attempts: int = Field(default=1, ge=0, le=2)
+
+
+class ModelPrice(_Strict):
+    """USD per million tokens. Use your provider's current price list."""
+
+    input: Decimal = Field(ge=0)
+    output: Decimal = Field(ge=0)
+
+
+class PaidService(_Strict):
+    """A subscription the system depends on (a data plan, hosting, ...)."""
+
+    name: str = Field(min_length=1, max_length=80)
+    monthly_usd: Decimal = Field(ge=0)
+    note: str = ""
+
+
+class CostsConfig(_Strict):
+    """What running the system costs (ADR 0014). Nothing is ever guessed: a model with no
+    price here shows tokens only, and totals that include it are shown as unknown."""
+
+    # Model id -> price. Dated ids ("gpt-6.1-sol-2026-09-01") match their base id.
+    llm_prices: dict[str, ModelPrice] = Field(default_factory=dict)
+    services: tuple[PaidService, ...] = (
+        PaidService(
+            name="Alpaca paper trading and market data (free plan)", monthly_usd=Decimal(0)
+        ),
+    )
+    # New LLM calls are refused once today's priced spend reaches this. None: no limit.
+    daily_llm_budget_usd: Decimal | None = Field(default=Decimal("2.00"), gt=0)
 
 
 class LiveConfig(_Strict):
@@ -207,9 +237,6 @@ class ReportingConfig(_Strict):
     output_dir: str = "reports"
     # Calendar days of history for the performance-to-date section.
     history_days: int = Field(default=365, ge=7, le=3650)
-    # Your actual LLM prices, to show cost in dollars. Unset: tokens only, never a guess.
-    llm_usd_per_million_input_tokens: Decimal | None = Field(default=None, ge=0)
-    llm_usd_per_million_output_tokens: Decimal | None = Field(default=None, ge=0)
 
 
 class StorageConfig(_Strict):
@@ -238,6 +265,7 @@ class AppConfig(_Strict):
     evaluation: EvaluationConfig = EvaluationConfig()
     live: LiveConfig = LiveConfig()
     learning: LearningConfig = LearningConfig()
+    costs: CostsConfig = CostsConfig()
 
     @model_validator(mode="after")
     def _environment_matches_broker(self) -> AppConfig:

@@ -222,3 +222,21 @@ lessons = sa.Table(
     sa.Column("retired_at", Timestamp),
     sa.Column("retired_reason", sa.Text),
 )
+
+# Every model call and what it cost (migration 0005, ADR 0014).
+llm_calls = sa.Table(
+    "llm_calls",
+    metadata,
+    sa.Column("id", sa.Integer, primary_key=True, autoincrement=True),
+    sa.Column("run_id", sa.String(64), sa.ForeignKey("runs.run_id"), index=True),
+    sa.Column("created_at", Timestamp, nullable=False, index=True),
+    sa.Column("agent", sa.String(32), nullable=False),
+    sa.Column("provider", sa.String(32), nullable=False),
+    sa.Column("model", sa.String(64), nullable=False),
+    sa.Column("status", sa.String(8), nullable=False),  # ok | error
+    sa.Column("input_tokens", sa.Integer, nullable=False),
+    sa.Column("output_tokens", sa.Integer, nullable=False),
+    sa.Column("latency_ms", sa.Float),
+    sa.Column("cost_usd", Exact),  # priced when the call happened; NULL = no price set
+    sa.Column("error", sa.Text),
+)

@@ -1025,8 +1025,7 @@ def test_critique_command_errors(
 GO_CONFIG = (
     "environment: paper\nbroker:\n  paper: true\n"
     "evaluation:\n  min_cycle_days: 5\n  min_closed_trades: 2\n"
-    "reporting:\n  llm_usd_per_million_input_tokens: 0.10\n"
-    "  llm_usd_per_million_output_tokens: 1.00\n"
+    "costs:\n  llm_prices:\n    gpt-6.1-sol: {input: 0.10, output: 1.00}\n"
 )
 
 
@@ -1330,3 +1329,44 @@ def test_lesson_commands_need_a_database(config_dir: Path) -> None:
         result = runner.invoke(cli.app, [*args, "--config-dir", str(config_dir)])
         assert result.exit_code == 2, args
         assert "DATABASE_URL is not set" in result.output
+
+
+# ---------- costs ----------
+
+
+def test_costs_command(config_dir: Path, audit_db: sa.Engine) -> None:
+    from trading_agent.domain.models import LLMCallRecord
+
+    store = SqlAuditStore(audit_db, AppConfig())
+    now = datetime.now(UTC)
+    for agent, cost in (("analyst", Decimal("0.40")), ("critic", Decimal("0.10"))):
+        store.record_llm_call(
+            LLMCallRecord(
+                created_at=now,
+                provider="openai",
+                model="gpt-6.1-sol",
+                agent=agent,
+                run_id=None,
+                status="ok",
+                usage=LLMUsage(input_tokens=1000, output_tokens=100),
+                latency_ms=1.0,
+            ),
+            cost,
+        )
+    result = runner.invoke(cli.app, ["costs", "--days", "2", "--config-dir", str(config_dir)])
+    assert result.exit_code == 0, result.output
+    assert "analyst $0.40" in result.output
+    assert "critic $0.10" in result.output
+    assert "Total: $0.50" in result.output
+    assert "Daily LLM budget: $2.00" in result.output
+
+    as_json = runner.invoke(
+        cli.app, ["costs", "--days", "1", "--json", "--config-dir", str(config_dir)]
+    )
+    assert Decimal(json.loads(as_json.stdout)["total"]["llm_usd"]) == Decimal("0.50")
+
+
+def test_costs_needs_a_database(config_dir: Path) -> None:
+    result = runner.invoke(cli.app, ["costs", "--config-dir", str(config_dir)])
+    assert result.exit_code == 2
+    assert "DATABASE_URL is not set" in result.output

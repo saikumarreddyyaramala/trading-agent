@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from collections.abc import Callable, Iterable, Sequence
 from datetime import UTC, datetime
+from decimal import Decimal
 from typing import Any, Protocol
 
 import sqlalchemy as sa
@@ -13,7 +14,13 @@ from pydantic import BaseModel, ConfigDict
 from trading_agent import __version__
 from trading_agent.agents.analyst import AnalystResult, ToolCallRecord
 from trading_agent.agents.critic import CriticResult
-from trading_agent.domain.models import BrokerOrder, Lesson, RiskDecision, TradeProposal
+from trading_agent.domain.models import (
+    BrokerOrder,
+    Lesson,
+    LLMCallRecord,
+    RiskDecision,
+    TradeProposal,
+)
 from trading_agent.execution.executor import ManageResult
 from trading_agent.observability.logging import get_logger
 from trading_agent.settings.models import AppConfig
@@ -125,6 +132,10 @@ class AuditStore(Protocol):
 
     def list_lessons(self, *, include_retired: bool) -> list[dict[str, Any]]: ...
 
+    def record_llm_call(self, call: LLMCallRecord, cost_usd: Decimal | None) -> None: ...
+
+    def llm_calls_between(self, start: datetime, end: datetime) -> list[dict[str, Any]]: ...
+
 
 class NullAuditStore:
     """Used when no database is configured: records nothing, finds nothing."""
@@ -199,6 +210,12 @@ class NullAuditStore:
         return False
 
     def list_lessons(self, *, include_retired: bool) -> list[dict[str, Any]]:
+        return []
+
+    def record_llm_call(self, call: LLMCallRecord, cost_usd: Decimal | None) -> None:
+        return None
+
+    def llm_calls_between(self, start: datetime, end: datetime) -> list[dict[str, Any]]:
         return []
 
 
@@ -619,6 +636,39 @@ class SqlAuditStore:
             return [dict(row) for row in connection.execute(query).mappings()]
 
         return self._read("lessons", read)
+
+    def record_llm_call(self, call: LLMCallRecord, cost_usd: Decimal | None) -> None:
+        def write(connection: sa.Connection) -> None:
+            connection.execute(
+                schema.llm_calls.insert().values(
+                    run_id=call.run_id if self._run_exists(connection, call.run_id) else None,
+                    created_at=call.created_at,
+                    agent=call.agent[:32],
+                    provider=call.provider[:32],
+                    model=call.model[:64],
+                    status=call.status,
+                    input_tokens=call.usage.input_tokens,
+                    output_tokens=call.usage.output_tokens,
+                    latency_ms=call.latency_ms,
+                    cost_usd=cost_usd,
+                    error=None if call.error is None else call.error[:2000],
+                )
+            )
+
+        self._write("llm call", write)
+
+    def llm_calls_between(self, start: datetime, end: datetime) -> list[dict[str, Any]]:
+        table = schema.llm_calls
+
+        def read(connection: sa.Connection) -> list[dict[str, Any]]:
+            query = (
+                sa.select(table)
+                .where(table.c.created_at >= start, table.c.created_at < end)
+                .order_by(table.c.created_at, table.c.id)
+            )
+            return [dict(row) for row in connection.execute(query).mappings()]
+
+        return self._read("llm calls", read)
 
     def environments(self) -> set[str]:
         def read(connection: sa.Connection) -> set[str]:

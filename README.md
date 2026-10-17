@@ -24,6 +24,12 @@ risk engine, executes on a broker, and reports the result against the S&P 500.
 | 10 | Evaluation: scorecard vs SPY, gatekeeper counterfactuals, go/no-go bar | Done |
 | 11 | Go live ($100): live gates, hard cap, cash-account checks (operator switches on) | Done |
 | 12 | Self-learning: daily review turns results into advisory, guarded lessons | Done |
+| 13 | Cost ledger: every model call priced, daily LLM budget, failing-tests-first | Done |
+| 14 | Trade scoring gate (expected value); up to 3 paper trades a day | Planned |
+| 15 | Pre-market and after-hours watch; next-day to-do list | Planned |
+| 16 | Guidebook, outcome-scored lessons, and playbooks | Planned |
+| 17 | Dashboard backend: live stream, news cards, costs | Planned |
+| 18 | Dashboard UI (local web app) | Planned |
 
 ## Architecture
 
@@ -50,11 +56,12 @@ Key rules (see [ADR 0001](docs/adr/0001-architecture.md), [ADR 0002](docs/adr/00
 [ADR 0005](docs/adr/0005-risk-engine.md), [ADR 0006](docs/adr/0006-order-execution.md),
 [ADR 0007](docs/adr/0007-audit-trail.md), [ADR 0008](docs/adr/0008-daily-cycle.md),
 [ADR 0009](docs/adr/0009-daily-report.md), [ADR 0010](docs/adr/0010-critic-agent.md),
-[ADR 0011](docs/adr/0011-evaluation.md), [ADR 0012](docs/adr/0012-going-live.md), and
-[ADR 0013](docs/adr/0013-self-learning.md)):
+[ADR 0011](docs/adr/0011-evaluation.md), [ADR 0012](docs/adr/0012-going-live.md),
+[ADR 0013](docs/adr/0013-self-learning.md), and [ADR 0014](docs/adr/0014-cost-ledger.md)):
 - The AI has read-only tools; it can never place an order directly. Tool inputs are
   validated and bounded, and each session has a call budget.
 - Every model call goes through the LLM gateway (pinned model, fallback, token caps, logs).
+  Each call is priced and recorded in the cost ledger, and a daily LLM budget caps spend.
 - The analyst's proposal is checked by code: every evidence item must cite a real tool call,
   and its price must match what the tools returned. Anything else means no trade.
 - A second LLM, the critic, reviews every buy against the exact tool outputs. It can only
@@ -127,6 +134,7 @@ Ready
 | `uv run trading-agent report` | Today's report (`--date`, `--json`, `--send`); saved to `reports/` |
 | `uv run trading-agent evaluate` | Score the paper record against the go/no-go bar (exit 0 = GO) |
 | `uv run trading-agent evaluate-critic` | Replay the current critic over recorded proposals (uses tokens) |
+| `uv run trading-agent costs` | What running the system cost, per day, agent, and model (`--days`, `--json`) |
 | `uv run trading-agent lessons` | What the agent has learned (`--all` includes retired ones) |
 | `uv run trading-agent retire-lesson ID --reason TEXT` | Stop the analyst from seeing a lesson |
 | `uv run trading-agent learn --date 2026-10-15` | Review a finished day now (uses tokens) |
@@ -157,6 +165,7 @@ src/trading_agent/
   reporting/             daily report: trade P&L, SPY benchmark, Markdown/JSON, webhook
   evaluation/            scorecard, go/no-go criteria, counterfactuals, critic replay
   learning/              daily review: day record, lessons kept, retired, and expired
+  costs/                 cost ledger: exact pricing, daily budget, summaries
   bootstrap.py           composition root
   health.py              pre-flight checks
   cli.py                 `trading-agent` command
@@ -209,6 +218,26 @@ The guardrails (ADR 0013):
 Every analysis records which lessons it used, and the daily report shows what was
 learned and retired. Review them with `trading-agent lessons`. Turn learning off with
 `learning.enabled: false`.
+
+## Costs
+
+Every model call (analyst, critic, reflector, health check) is recorded with its tokens
+and priced when it happens, failed attempts included. Paid subscriptions are listed
+under `costs.services` and spread over each day. See it all with `trading-agent costs`,
+in the daily report's "Costs today" section, and in the health check.
+
+Set your provider's prices once in `config/base.yaml`:
+
+```yaml
+costs:
+  llm_prices:
+    gpt-6.1-sol: {input: 2.50, output: 10.00}   # USD per million tokens
+  daily_llm_budget_usd: 2.00
+```
+
+Nothing is guessed. A model without a price shows tokens only, and totals that include
+it read "$X + unpriced". Once today's priced spend reaches the budget, new LLM calls are
+refused, which means no new analysis or trade that day (see ADR 0014).
 
 ## Evaluation: the bar for real money
 

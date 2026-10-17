@@ -185,20 +185,68 @@ def test_trading_day_report(store: SqlAuditStore) -> None:
     assert report.warnings == []
 
 
-def test_llm_cost_appears_only_with_configured_prices(store: SqlAuditStore) -> None:
-    _record_trading_day(store)
-    priced = AppConfig.model_validate(
-        {
-            "reporting": {
-                "llm_usd_per_million_input_tokens": "2.50",
-                "llm_usd_per_million_output_tokens": "10",
-            }
-        }
+def _ledger(store: SqlAuditStore, agent: str, cost: str | None, run_id: str | None = RUN) -> None:
+    from trading_agent.domain.models import LLMCallRecord
+
+    store.record_llm_call(
+        LLMCallRecord(
+            created_at=_ny(9),
+            provider="openai",
+            model="gpt-6.1-sol" if cost is not None else "mystery",
+            agent=agent,
+            run_id=run_id,
+            status="ok",
+            usage=LLMUsage(input_tokens=9_000, output_tokens=1_000),
+            latency_ms=1.0,
+        ),
+        None if cost is None else Decimal(cost),
     )
-    report = _builder(store, config=priced).build(DAY)
+
+
+def test_costs_today_come_from_the_ledger(store: SqlAuditStore) -> None:
+    _record_trading_day(store)
+    _ledger(store, "analyst", "0.0400")
+    _ledger(store, "analyst", "0.0250")
+    _ledger(store, "critic", "0.0100")
+    config = AppConfig.model_validate(
+        {"costs": {"services": [{"name": "Data plan", "monthly_usd": "99"}]}}
+    )
+    report = _builder(store, config=config).build(DAY)
     assert report.analysis is not None
-    assert report.analysis.cost_usd == Decimal("0.0650")  # 18k x $2.50/M + 2k x $10/M
-    assert report.llm.cost_usd == Decimal("0.0650")
+    assert report.analysis.cost_usd == Decimal("0.0650")  # this run's analyst calls
+    assert report.costs is not None
+    assert report.costs.llm_usd == Decimal("0.0750")
+    assert report.costs.services_usd == Decimal("3.2548")
+    assert report.costs.total_usd == Decimal("3.3298")
+    markdown = render_markdown(report)
+    assert "## Costs today" in markdown
+    assert "LLM $0.08 (analyst $0.07, critic $0.01; 3 calls, 30,000 tokens)" in markdown
+    assert "Services $3.25. Total $3.33." in markdown
+
+
+def test_unpriced_calls_are_called_out(store: SqlAuditStore) -> None:
+    _record_trading_day(store)
+    _ledger(store, "analyst", "0.0400")
+    _ledger(store, "reflector", None)
+    report = _builder(store).build(DAY)
+    assert report.costs is not None
+    assert report.costs.llm_usd is None
+    assert report.unpriced_models == ["mystery"]
+    markdown = render_markdown(report)
+    assert "LLM $0.04 + unpriced" in markdown
+    assert "No price set for mystery" in markdown
+
+
+def test_unreadable_ledger_is_a_warning_in_the_report(store: SqlAuditStore) -> None:
+    _record_trading_day(store)
+
+    def down(start: Any, end: Any) -> Any:
+        raise AuditError("ledger down")
+
+    store.llm_calls_between = down  # type: ignore[method-assign]
+    report = _builder(store).build(DAY)
+    assert report.costs is None
+    assert "cost ledger unavailable: ledger down" in report.warnings
 
 
 def test_day_without_a_cycle(store: SqlAuditStore) -> None:
