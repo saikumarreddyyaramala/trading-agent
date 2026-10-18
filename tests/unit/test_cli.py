@@ -1844,3 +1844,23 @@ def test_chat_command_answers_like_the_bot(
     result = runner.invoke(cli.app, ["chat", "hi", "there", "--config-dir", str(config_dir)])
     assert result.exit_code == 0, result.output
     assert "you said hi there" in result.output
+
+
+def test_run_refuses_a_second_copy(config_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import yaml
+
+    from trading_agent.orchestration.single import single_instance
+
+    base = config_dir / "base.yaml"
+    data = yaml.safe_load(base.read_text(encoding="utf-8"))
+    lock = config_dir.parent / "cycle.lock"
+    data["orchestration"]["lock_file"] = str(lock)
+    base.write_text(yaml.safe_dump(data), encoding="utf-8")
+    phone = _phone(monkeypatch)
+    calls = _use_fake_cycle(monkeypatch, TRADED)
+    with single_instance(lock):
+        result = runner.invoke(cli.app, ["run", "--config-dir", str(config_dir)])
+    assert result.exit_code == 2
+    assert "already running" in result.output
+    assert calls == []  # the cycle never started
+    assert phone.sent == []  # and no "started" alert

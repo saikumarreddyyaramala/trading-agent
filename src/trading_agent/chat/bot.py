@@ -50,7 +50,8 @@ of plain text, no Markdown tables. Indicators and past results describe the past
 promise profits or give personal financial advice."""
 
 _GREETING = re.compile(
-    r"^(hi|hello|hey|hiya|yo|good (morning|afternoon|evening)|/start)\b[\s!.,?]*\w{0,12}[\s!.?]*$"
+    r"^(hi+|hel+o+|he+y+|hiya|yo|sup|gm|good (morning|afternoon|evening)|/start)\b"
+    r"[\s!.,?]*\w{0,12}[\s!.?]*$"
 )
 _TRADE_REQUEST = re.compile(r"^(please\s+)?(buy|sell|short|close|cancel|exit|liquidate)\b")
 

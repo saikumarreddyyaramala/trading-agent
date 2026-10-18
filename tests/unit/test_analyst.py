@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from typing import Any
 
 import anyio
@@ -73,6 +74,7 @@ def _run(
     tool_budget: int = 100,
     lessons: tuple[Lesson, ...] = (),
     playbooks: tuple[Any, ...] = (),
+    now: datetime = NOW,
     **analyst: Any,
 ) -> tuple[AnalystResult, FakeProvider]:
     market_data = healthy_market_data("AAPL", "MSFT")
@@ -96,7 +98,7 @@ def _run(
         gateway,
         build_server(tools),
         config,
-        clock=lambda: NOW,
+        clock=lambda: now,
         logger=log or _Log(),
         lessons=lessons,
         playbooks=playbooks,
@@ -328,3 +330,11 @@ def test_an_unknown_playbook_name_is_dropped() -> None:
     assert result.status == "proposed"
     assert result.proposal is not None
     assert result.proposal.playbook is None
+
+
+def test_a_pre_open_run_is_told_when_its_buy_would_be_placed() -> None:
+    before_open = datetime(2026, 10, 19, 12, 45, tzinfo=UTC)  # Monday 08:45 New York
+    _, provider = _run([NO_TRADE], now=before_open)
+    task = " ".join(_messages(provider, 0)[0].content.split())
+    assert "Monday 2026-10-19 08:45" in task
+    assert "placed after 09:45" in task

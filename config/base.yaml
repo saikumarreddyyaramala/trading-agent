@@ -102,6 +102,7 @@ orchestration:
   close_settle_seconds: 30        # wait before verifying the account is flat
   keep_awake: true                # ask Windows not to sleep while the cycle runs (not the lid)
   max_crashes_per_hour: 5         # restart after a crash; stop after this many in an hour
+  lock_file: data/cycle.lock      # only one cycle may run at a time
 
 # Daily report, written after the close (and on demand: `trading-agent report`).
 reporting:

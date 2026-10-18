@@ -220,3 +220,16 @@ def test_enforce_directly() -> None:
         ),
     )
     assert enforce(output, PROPOSAL) == ("approved", ())
+
+
+def test_the_systems_own_notices_are_not_a_red_flag() -> None:
+    # A rehearsal showed the critic vetoing because of these labels, which the system writes.
+    from trading_agent.agents.critic import CRITIC_SYSTEM_PROMPT
+    from trading_agent.mcp_server.tools import TECHNICAL_NOTICE, UNTRUSTED_NEWS_NOTICE
+
+    prompt = " ".join(CRITIC_SYSTEM_PROMPT.split())
+    assert " ".join(UNTRUSTED_NEWS_NOTICE.split()) in prompt
+    assert " ".join(TECHNICAL_NOTICE.split()) in prompt
+    assert '"notice" field' in prompt
+    assert "never a red flag" in prompt
+    assert "red flag and veto" in prompt  # third-party instructions still are

@@ -208,3 +208,10 @@ def test_heavy_selling_reads_bearish_in_plain_english() -> None:
     volume = reading(report, "Volume")
     assert volume.signal == "bearish"
     assert volume.note == "heavy volume (2.0x average) on a down day"
+
+
+def test_the_report_time_is_in_market_time() -> None:
+    # A UTC timestamp made a Saturday evening in New York read as Sunday.
+    saturday_evening = datetime(2026, 10, 18, 2, 56, tzinfo=UTC)
+    report = technical_report("AAPL", daily(uptrend()), now=saturday_evening)
+    assert report.as_of.isoformat() == "2026-10-17T22:56:00-04:00"

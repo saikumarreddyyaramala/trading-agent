@@ -303,6 +303,15 @@ class TradeProposal(_Frozen):
     # The playbook the analyst followed, if any (ADR 0017); unknown names are dropped.
     playbook: str | None = Field(default=None, max_length=40)
 
+    @field_validator("playbook", mode="before")
+    @classmethod
+    def _playbook_name_or_none(cls, value: Any) -> Any:
+        # Models sometimes write a sentence here ("none - no playbook fits ..."). A value
+        # that cannot be a playbook name means no playbook, not a broken answer.
+        if not isinstance(value, str) or not value.strip() or len(value.strip()) > 40:
+            return None
+        return value.strip()
+
     @field_validator("symbol")
     @classmethod
     def _upper_symbol(cls, value: str | None) -> str | None:

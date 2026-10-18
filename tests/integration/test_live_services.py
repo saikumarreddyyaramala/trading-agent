@@ -152,7 +152,9 @@ def test_risk_engine_with_live_data() -> None:
     decision = engine.evaluate(proposal)
     assert not decision.approved
     assert "Asset" in [c.name for c in decision.failed_checks]
-    assert len(decision.checks) == 15
+    names = [c.name for c in decision.checks]
+    assert len(names) == 16  # 15 rules plus the trade score (ADR 0015)
+    assert "Trade score" in names
 
 
 @pytest.mark.skipif(os.environ.get("CI") == "true", reason="never spend LLM tokens in CI")

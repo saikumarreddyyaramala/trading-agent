@@ -192,3 +192,33 @@ def test_keep_awake_does_nothing_when_off_or_not_windows(enabled: bool, platform
 def test_keep_awake_reports_when_windows_refuses() -> None:
     with keep_awake(True, platform="win32", setter=lambda flags: 0) as active:
         assert not active
+
+
+# ---------- One cycle at a time ----------
+
+
+def test_a_second_cycle_is_refused_while_one_runs(tmp_path: Any) -> None:
+    import os
+
+    from trading_agent.orchestration.single import AlreadyRunningError, single_instance
+
+    lock = tmp_path / "data" / "cycle.lock"
+    with (
+        single_instance(lock),
+        pytest.raises(AlreadyRunningError, match="already running") as caught,
+        single_instance(lock),
+    ):
+        pass  # pragma: no cover - must not get here
+    assert str(os.getpid()) in str(caught.value)
+    with single_instance(lock):  # released on exit: the next start works
+        pass
+
+
+def test_the_lock_is_released_after_a_crash(tmp_path: Any) -> None:
+    from trading_agent.orchestration.single import single_instance
+
+    lock = tmp_path / "cycle.lock"
+    with pytest.raises(RuntimeError), single_instance(lock):
+        raise RuntimeError("boom")
+    with single_instance(lock):
+        pass

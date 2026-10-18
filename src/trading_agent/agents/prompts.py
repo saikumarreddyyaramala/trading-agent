@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from datetime import datetime
+from datetime import datetime, time
 from zoneinfo import ZoneInfo
 
 from trading_agent.domain.models import Lesson, Playbook
 from trading_agent.settings.models import AppConfig
 
-PROMPT_VERSION = "analyst-2026-10-17.4"
+PROMPT_VERSION = "analyst-2026-10-18.1"
+MARKET_OPEN = time(9, 30)
 
 _SYSTEM = """\
 You are the research analyst of an automated US stock trading system.
@@ -117,12 +118,27 @@ def system_prompt(
     return prompt
 
 
-def task_prompt(now: datetime, timezone: str, context: str | None = None) -> str:
+def task_prompt(
+    now: datetime,
+    timezone: str,
+    context: str | None = None,
+    *,
+    trade_window_start: time | None = None,
+) -> str:
     local = now.astimezone(ZoneInfo(timezone))
     prompt = (
         f"It is {local:%A %Y-%m-%d %H:%M} ({timezone}). Research today's market and give your "
         "proposal for one intraday long trade, or no trade."
     )
+    if trade_window_start is not None and local.time() < MARKET_OPEN:
+        prompt += (
+            f"\n\nThe market opens at {MARKET_OPEN:%H:%M}: you are researching before the "
+            "open. market_status saying closed, and thin or stale pre-market quotes, is "
+            "expected before the open and is not by itself a reason for no_trade. A buy you "
+            f"propose is placed after {trade_window_start:%H:%M}, and only if fresh prices "
+            "then still pass the risk checks. Use the latest prices you saw as the "
+            "reference_price."
+        )
     return f"{prompt}\n\n{context}" if context else prompt
 
 

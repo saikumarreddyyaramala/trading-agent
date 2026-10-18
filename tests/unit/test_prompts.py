@@ -102,3 +102,23 @@ def test_system_prompt_teaches_technical_analysis(config_dir: Path) -> None:
     assert "Indicators describe the past" in prompt
     assert "cite the reading" in prompt
     assert "overbought" in prompt
+
+
+def test_before_the_open_the_analyst_knows_when_its_buy_is_placed() -> None:
+    from datetime import UTC, datetime, time
+
+    before_open = datetime(2026, 10, 19, 12, 45, tzinfo=UTC)  # 08:45 New York
+    prompt = " ".join(
+        task_prompt(before_open, "America/New_York", trade_window_start=time(9, 45)).split()
+    )
+    assert "Monday 2026-10-19 08:45" in prompt
+    assert "The market opens at 09:30" in prompt
+    assert "placed after 09:45" in prompt
+    assert "is expected before the open" in prompt
+
+
+def test_during_the_session_there_is_no_pre_open_note() -> None:
+    from datetime import time
+
+    prompt = task_prompt(NOW, "America/New_York", trade_window_start=time(9, 45))
+    assert "opens at 09:30" not in prompt

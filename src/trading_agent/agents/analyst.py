@@ -164,7 +164,12 @@ class AnalystAgent:
             messages = [
                 ChatMessage(
                     role="user",
-                    content=task_prompt(started_at, self._config.schedule.timezone, context),
+                    content=task_prompt(
+                        started_at,
+                        self._config.schedule.timezone,
+                        context,
+                        trade_window_start=self._config.schedule.trade_window_start,
+                    ),
                 )
             ]
             repairs_left = self._limits.repair_attempts

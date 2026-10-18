@@ -69,7 +69,14 @@ that escapes the cycle, such as a locked database or a bug.
 - Ctrl+C is not a crash.
 - Open positions keep their broker-side stop-loss throughout.
 
-### 6. No auto-start
+### 6. One cycle at a time
+A weekend audit found two copies of `trading-agent run` running at once. On a trading day
+each would analyse and enter trades, and Telegram rejected their competing listeners
+(HTTP 409). `run` now holds an exclusive operating-system lock on
+`orchestration.lock_file`. The system releases it when the process ends, even on a crash,
+so a stale lock is impossible. A second copy refuses to start and names the holder.
+
+### 7. No auto-start
 The operator starts `trading-agent run` by hand. Nothing here changes Windows settings or
 adds startup entries.
 

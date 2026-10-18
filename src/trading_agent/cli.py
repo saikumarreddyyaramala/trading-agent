@@ -36,6 +36,7 @@ from trading_agent.mcp_server.tools import ResearchToolError
 from trading_agent.observability.logging import configure_logging
 from trading_agent.orchestration.cycle import DailyCycle, DayResult
 from trading_agent.orchestration.power import keep_awake
+from trading_agent.orchestration.single import AlreadyRunningError, single_instance
 from trading_agent.orchestration.supervisor import supervise
 from trading_agent.reporting.delivery import DeliveryError, post_webhook, save_report
 from trading_agent.reporting.report import render_markdown
@@ -655,9 +656,19 @@ def run(
     """Run the daily trading cycle on the PAPER account, on the configured schedule.
 
     Pre-flight, analysis (uses LLM tokens), risk check, entry, exit management, force-close,
-    and reconciliation. Safe to restart: finished steps are not repeated.
+    and reconciliation. Safe to restart: finished steps are not repeated. Only one copy may
+    run at a time.
     """
     container = _container(env, config_dir)
+    try:
+        with single_instance(Path(container.config.orchestration.lock_file)):
+            _run_cycle(container, once)
+    except AlreadyRunningError as exc:
+        typer.secho(f"Cannot start: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=2) from exc
+
+
+def _run_cycle(container: Container, once: bool) -> None:
     try:
         services = container.build_cycle_services()
     except ConfigError as exc:

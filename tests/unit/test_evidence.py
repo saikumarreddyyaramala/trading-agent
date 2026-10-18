@@ -230,3 +230,22 @@ def test_buy_missing_fields_reports_instead_of_crashing() -> None:
     )
     problems = verify_proposal(proposal, _ledger(), max_price_deviation_pct=LIMIT)
     assert problems == ["a buy proposal needs a symbol and a reference_price"]
+
+
+@pytest.mark.parametrize(
+    "playbook",
+    [
+        "none - no playbook fits a pre-open Monday with stale weekend quotes",  # seen live
+        42,
+        ["gap-and-go"],
+    ],
+)
+def test_a_bad_playbook_value_means_no_playbook_not_a_rejection(playbook: Any) -> None:
+    # A rehearsal showed the model writing a sentence here; that must not cost a repair.
+    proposal = parse_proposal(json.dumps(_buy(playbook=playbook)))
+    assert proposal.playbook is None
+    assert proposal.decision == "buy"
+
+
+def test_a_short_playbook_name_is_kept() -> None:
+    assert parse_proposal(json.dumps(_buy(playbook="gap-and-go"))).playbook == "gap-and-go"

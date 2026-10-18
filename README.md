@@ -277,6 +277,9 @@ in. If the cycle crashes, it restarts by itself after a short, growing pause. Af
 5 crashes in an hour, it stops and tells you. Restarting is safe: finished steps are never
 repeated, and open positions keep their broker-side stop-loss.
 
+Only one copy of `trading-agent run` can run at a time: a second one refuses to start
+(two copies would each trade, and Telegram rejects two listeners).
+
 ## Chat with the bot
 
 Once alerts are set up, you can message the bot on Telegram while `trading-agent run` is

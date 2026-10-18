@@ -321,6 +321,8 @@ class OrchestrationConfig(_Strict):
     keep_awake: bool = True
     # Restart the cycle after an unexpected crash; give up after this many in an hour.
     max_crashes_per_hour: int = Field(default=5, ge=1, le=20)
+    # Only one `trading-agent run` at a time: it holds an OS lock on this file.
+    lock_file: str = "data/cycle.lock"
 
 
 AlertKind = Literal["start", "trade", "exit", "failure", "halt", "report", "crash"]

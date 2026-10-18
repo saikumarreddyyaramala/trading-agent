@@ -438,7 +438,7 @@ def technical_report(
     net = bullish - bearish
     return TechnicalReport(
         symbol=symbol,
-        as_of=now,
+        as_of=now.astimezone(zone),
         price=Decimal(str(round(price, 4))),
         trend={
             "sma_20": _r(sma20),

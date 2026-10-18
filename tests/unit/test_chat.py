@@ -475,3 +475,12 @@ def test_a_damaged_pause_file_does_not_pause(tmp_path: Path) -> None:
 def test_chat_config_is_validated() -> None:
     with pytest.raises(ValueError, match="max_ai_answers_per_day"):
         ChatConfig.model_validate({"max_ai_answers_per_day": -1})
+
+
+@pytest.mark.parametrize(
+    "text", ["Hii", "hiii!", "heyy", "Hellooo", "hey there", "gm", "Good morning bot"]
+)
+def test_informal_greetings_are_free(tmp_path: Path, text: str) -> None:
+    bot, _, ai, _ = _bot(tmp_path)
+    assert bot.reply(text).startswith("Hi!")
+    assert ai.requests == []
