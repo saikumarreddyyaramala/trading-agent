@@ -179,3 +179,65 @@ def test_portfolio_history_errors_are_wrapped() -> None:
         broker.get_portfolio_history("1D")
     with pytest.raises(ValueError, match="span"):
         broker.get_portfolio_history("5Y")
+
+
+# ---------- Market calendar (ADR 0023) ----------
+
+
+class _CalendarClient:
+    """Alpaca returns market-local naive times; holidays are simply missing."""
+
+    def __init__(self, *, fail: bool = False) -> None:
+        self.fail = fail
+        self.requests: list[Any] = []
+
+    def get_calendar(self, request: Any) -> list[Any]:
+        self.requests.append(request)
+        if self.fail:
+            raise ConnectionError("network down")
+        days = {
+            "2026-11-25": ("09:30", "16:00"),
+            "2026-11-27": ("09:30", "13:00"),  # the day after Thanksgiving closes early
+        }
+        out = []
+        for day, (open_, close) in days.items():
+            if request.start.isoformat() <= day <= request.end.isoformat():
+                d = datetime.fromisoformat(day)
+                out.append(
+                    SimpleNamespace(
+                        date=d.date(),
+                        open=datetime.fromisoformat(f"{day}T{open_}"),
+                        close=datetime.fromisoformat(f"{day}T{close}"),
+                    )
+                )
+        return out
+
+
+def test_a_trading_day_has_its_hours_in_market_time() -> None:
+    from datetime import date
+    from zoneinfo import ZoneInfo
+
+    broker = AlpacaBroker("k", "s", paper=True, client=_CalendarClient())
+    day = broker.get_market_day(date(2026, 11, 27))
+    assert day is not None
+    ny = ZoneInfo("America/New_York")
+    assert day.open == datetime(2026, 11, 27, 9, 30, tzinfo=ny)
+    assert day.close == datetime(2026, 11, 27, 13, 0, tzinfo=ny)  # early close
+    assert day.early_close
+
+
+def test_a_holiday_has_no_market_day() -> None:
+    from datetime import date
+
+    client = _CalendarClient()
+    broker = AlpacaBroker("k", "s", paper=True, client=client)
+    assert broker.get_market_day(date(2026, 11, 26)) is None  # Thanksgiving
+    assert client.requests[0].start == client.requests[0].end == date(2026, 11, 26)
+
+
+def test_calendar_errors_are_wrapped() -> None:
+    from datetime import date
+
+    broker = AlpacaBroker("k", "s", paper=True, client=_CalendarClient(fail=True))
+    with pytest.raises(BrokerError, match="could not fetch the market calendar"):
+        broker.get_market_day(date(2026, 11, 25))

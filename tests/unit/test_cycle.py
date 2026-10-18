@@ -1112,7 +1112,7 @@ def test_the_day_starts_with_a_scan_and_ends_with_a_plan(tmp_path: Path) -> None
     assert order[:4] == ["premarket", "health", "brief", "analyze"]
     assert order[-5:] == ["reconcile", "postmarket", "reflect", "plan", "report"]
     assert h.when("premarket") == at(8)
-    assert h.when("postmarket") == at(16, 45)
+    assert h.when("postmarket") == at(20, 30)
     assert result.steps["premarket"] == "ok"
     assert result.steps["postmarket"] == "ok"
     assert result.steps["plan"] == "ok"
@@ -1182,7 +1182,7 @@ def test_post_market_waits_for_an_early_close(tmp_path: Path) -> None:
     session = h.cycle.session(THURSDAY)
     assert session is not None
     assert session.premarket == at(8)
-    assert session.post_market == at(16, 45)  # later of 16:45 and 30 minutes after 13:00
+    assert session.post_market == at(20, 30)  # later of 20:30 and 30 minutes after 13:00
 
 
 def test_the_next_day_starts_in_time_for_the_premarket_scan(tmp_path: Path) -> None:
@@ -1343,3 +1343,37 @@ def test_a_broken_pause_check_does_not_block_trading(tmp_path: Path) -> None:
     h = Harness(tmp_path)
     result = _rebuild(h, paused=_boom).run_day(THURSDAY)
     assert result.status == "traded"
+
+
+# ---------- The evening after the post-market (ADR 0023) ----------
+
+
+def test_the_evening_steps_run_after_the_post_market(tmp_path: Path, config_dir: Path) -> None:
+    from trading_agent.settings import load_config
+
+    h = Harness(tmp_path, config=load_config("paper", config_dir))
+    when: dict[str, datetime] = {}
+
+    def step(name: str) -> Any:
+        def run(day: date) -> str:
+            when[name] = h.time.now.astimezone(NY)
+            return "ok"
+
+        return run
+
+    sent: list[tuple[str, datetime]] = []
+    _rebuild(
+        h,
+        postmarket=step("postmarket"),
+        reflect=step("reflect"),
+        plan=step("plan"),
+        report=step("report"),
+        alert=lambda kind, text: sent.append((kind, h.time.now.astimezone(NY))),
+    )
+    h.cycle.run_day(THURSDAY)
+    # Lessons, the next-day plan, and the report wait for the whole day, post-market included.
+    assert when["postmarket"] == at(20, 30)
+    assert at(20, 30) <= when["reflect"] <= when["plan"] <= when["report"]
+    # The trading result still reaches the phone at the close, not at night.
+    (result_at,) = [t for kind, t in sent if kind == "report"]
+    assert result_at < at(17)

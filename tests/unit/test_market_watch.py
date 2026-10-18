@@ -218,3 +218,10 @@ def test_report_round_trips_as_json() -> None:
 
     report = _watch().scan("pre", DAY, FOCUS)
     assert WatchReport.model_validate_json(report.model_dump_json()) == report
+
+
+def test_a_tiny_fall_rounds_to_zero_without_a_minus_sign() -> None:
+    from trading_agent.watch.market_watch import _pct
+
+    assert str(_pct(Decimal("-0.001"))) == "0.00"  # was "-0.00%" in the journal and alerts
+    assert str(_pct(Decimal("-0.006"))) == "-0.01"

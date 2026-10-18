@@ -380,7 +380,7 @@ def test_after_the_close_the_post_market_scan_is_next(store: SqlAuditStore) -> N
     data = DashboardData(
         store, AppConfig(), broker=_Closed(), market_data=None, news=None, clock=lambda: _ny(16, 30)
     )
-    assert data.overview()["next_step"] == {"step": "postmarket", "at": _ny(16, 45).isoformat()}
+    assert data.overview()["next_step"] == {"step": "postmarket", "at": _ny(20, 30).isoformat()}
 
 
 # ---------- Failure paths (ADR 0018) ----------
@@ -424,10 +424,17 @@ def test_an_unreadable_database_gives_empty_sections() -> None:
 
 
 def test_after_the_last_step_the_next_is_tomorrows_premarket(store: SqlAuditStore) -> None:
-    late = DashboardData(
-        store, AppConfig(), broker=None, market_data=None, news=None, clock=lambda: _ny(20)
-    )
-    assert late.overview()["next_step"] == {"step": "premarket", "at": "2026-10-16T08:00:00-04:00"}
+    def at(hour: int) -> DashboardData:
+        return DashboardData(
+            store, AppConfig(), broker=None, market_data=None, news=None, clock=lambda: _ny(hour)
+        )
+
+    # The evening steps wait for the post-market to end (ADR 0023).
+    assert at(20).overview()["next_step"] == {"step": "postmarket", "at": _ny(20, 30).isoformat()}
+    assert at(21).overview()["next_step"] == {
+        "step": "premarket",
+        "at": "2026-10-16T08:00:00-04:00",
+    }
 
 
 def test_history_without_a_broker() -> None:

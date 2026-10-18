@@ -6,18 +6,24 @@ arrives in Phase 5 and will only ever be called after the risk engine approves.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from enum import Enum
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from alpaca.trading.client import TradingClient
 from alpaca.trading.enums import OrderSide, QueryOrderStatus
-from alpaca.trading.requests import GetOrdersRequest, GetPortfolioHistoryRequest
+from alpaca.trading.requests import (
+    GetCalendarRequest,
+    GetOrdersRequest,
+    GetPortfolioHistoryRequest,
+)
 
 from trading_agent.domain.models import (
     AccountSnapshot,
     MarketClock,
+    MarketDay,
     PortfolioHistory,
     PortfolioPoint,
     Position,
@@ -25,6 +31,7 @@ from trading_agent.domain.models import (
 
 # Alpaca returns at most 500 orders per request; far above one trade a day.
 MAX_ORDERS_PER_QUERY = 500
+MARKET_ZONE = ZoneInfo("America/New_York")  # Alpaca's calendar times are market-local
 
 
 class BrokerError(RuntimeError):
@@ -108,6 +115,22 @@ class AlpacaBroker:
             next_open=clock.next_open,
             next_close=clock.next_close,
         )
+
+    def get_market_day(self, day: date) -> MarketDay | None:
+        try:
+            days = self._client.get_calendar(GetCalendarRequest(start=day, end=day))
+        except Exception as exc:
+            raise BrokerError(
+                f"could not fetch the market calendar: {type(exc).__name__}: {exc}"
+            ) from exc
+        for found in days:
+            if found.date == day:  # Alpaca gives market-local times without a zone
+                return MarketDay(
+                    day=day,
+                    open=found.open.replace(tzinfo=MARKET_ZONE),
+                    close=found.close.replace(tzinfo=MARKET_ZONE),
+                )
+        return None
 
     def get_positions(self) -> tuple[Position, ...]:
         try:

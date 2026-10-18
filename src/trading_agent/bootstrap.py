@@ -27,7 +27,7 @@ from trading_agent.chat.listener import ChatListener
 from trading_agent.chat.pause import PauseStore
 from trading_agent.chat.records import ChatRecords
 from trading_agent.costs import CostLedger, CostReport, cost_report
-from trading_agent.dashboard.data import DashboardData
+from trading_agent.dashboard.data import DashboardData, jsonable
 from trading_agent.data.alpaca_market_data import AlpacaMarketData
 from trading_agent.data.alpaca_news import AlpacaNews
 from trading_agent.data.collector import MarketDataCollector
@@ -44,6 +44,16 @@ from trading_agent.execution.alpaca_orders import AlpacaOrderExecutor
 from trading_agent.execution.executor import Executor
 from trading_agent.execution.live import blocking_reason, live_readiness
 from trading_agent.health import CheckResult, run_healthchecks
+from trading_agent.journal.recorder import JournalRecorder
+from trading_agent.journal.sources import (
+    FEEDS,
+    AlpacaNewsSource,
+    FederalRegisterSource,
+    RssSource,
+    Source,
+)
+from trading_agent.journal.store import JournalStore
+from trading_agent.journal.writer import JournalWriter
 from trading_agent.learning.curator import Curator
 from trading_agent.learning.service import LearningService
 from trading_agent.llm.anthropic_provider import AnthropicProvider
@@ -365,28 +375,23 @@ class Container:
         detail = f"scanned {len(report.items)} symbols, {len(report.alerts)} alert(s)"
         return detail + (f"; {'; '.join(report.errors)}" if report.errors else "")
 
-    def premarket(self, day: date) -> str:
-        """Scan before the open: yesterday's plan symbols, open positions, top movers."""
-        focus: dict[str, list[str]] = {}
+    def _plan_focus(self, day: date, focus: dict[str, list[str]]) -> None:
         plan = self.build_audit_store().plan_for(day)
         for item in (plan or {}).get("items", []):
             if item.get("symbol"):
                 focus.setdefault(item["symbol"], []).append("plan")
-        for symbol in self._held():
-            focus.setdefault(symbol, []).append("held")
-        return self._scan("pre", day, focus)
 
-    def postmarket(self, day: date) -> str:
-        """Scan after the close: today's trades and ideas, open positions, top movers."""
+    def _day_trades(self, day: date) -> list[Any]:
         store = self.build_audit_store()
         zone = ZoneInfo(self.config.schedule.timezone)
         start = datetime.combine(day, time(0), tzinfo=zone)
-        focus: dict[str, list[str]] = {}
-        for trade in trades_from_orders(
-            store.orders_between(start, start + timedelta(days=1)), zone
-        ):
-            if trade.day == day:
-                focus.setdefault(trade.symbol, []).append("traded")
+        orders = store.orders_between(start, start + timedelta(days=1))
+        return [t for t in trades_from_orders(orders, zone) if t.day == day]
+
+    def _session_focus(self, day: date, focus: dict[str, list[str]]) -> None:
+        for trade in self._day_trades(day):
+            focus.setdefault(trade.symbol, []).append("traded")
+        store = self.build_audit_store()
         main = store.get_run(DailyCycle.run_id(day))
         for run in [main, *slot_runs(store, DailyCycle.run_id(day))] if main else []:
             proposal = (run["analysis"] or {}).get("proposal") or {}
@@ -394,9 +399,85 @@ class Container:
                 reasons = focus.setdefault(proposal["symbol"], [])
                 if "proposed" not in reasons:
                     reasons.append("proposed")
+
+    def premarket(self, day: date) -> str:
+        """Scan before the open: yesterday's plan symbols, open positions, top movers."""
+        focus: dict[str, list[str]] = {}
+        self._plan_focus(day, focus)
+        for symbol in self._held():
+            focus.setdefault(symbol, []).append("held")
+        return self._scan("pre", day, focus)
+
+    def postmarket(self, day: date) -> str:
+        """Scan after the close: today's trades and ideas, open positions, top movers."""
+        focus: dict[str, list[str]] = {}
+        self._session_focus(day, focus)
         for symbol in self._held():
             focus.setdefault(symbol, []).append("held")
         return self._scan("post", day, focus)
+
+    # ---------- Market journal (ADR 0023) ----------
+
+    def journal_focus(self, day: date) -> dict[str, list[str]]:
+        """What the journal watches besides the indexes: the plan, positions, today's ideas."""
+        focus: dict[str, list[str]] = {}
+        self._plan_focus(day, focus)
+        self._session_focus(day, focus)
+        for symbol in self._held():
+            focus.setdefault(symbol, []).append("held")
+        return focus
+
+    def journal_trades(self, day: date) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = jsonable([t.model_dump() for t in self._day_trades(day)])
+        return rows
+
+    def build_journal_sources(self) -> list[Source]:
+        wanted = self.config.journal.sources
+        zone = ZoneInfo(self.config.schedule.timezone)
+        sources: list[Source] = []
+        if wanted.company_news:
+            sources.append(
+                AlpacaNewsSource(
+                    self.build_news(), lambda: list(self.journal_focus(datetime.now(zone).date()))
+                )
+            )
+        for name in ("federal_reserve", "bls"):
+            if getattr(wanted, name):
+                url, kind = FEEDS[name]
+                sources.append(RssSource(name, url, kind))
+        if wanted.federal_register:
+            sources.append(FederalRegisterSource())
+        return sources
+
+    def build_journal_recorder(self) -> JournalRecorder | None:
+        """None when the journal is off or market data keys are missing. Without an LLM key
+        it still records; the notebook then holds the facts only."""
+        journal = self.config.journal
+        if not journal.enabled:
+            return None
+        try:
+            watch = self.build_market_watch()
+            broker = self.build_broker()
+            sources = self.build_journal_sources()
+        except ConfigError:
+            return None
+        try:
+            writer: JournalWriter | None = JournalWriter(
+                self.build_llm_gateway().complete, max_sources=journal.max_sources_in_prompt
+            )
+        except ConfigError:
+            writer = None
+        return JournalRecorder(
+            JournalStore(Path(journal.directory)),
+            scan=watch.scan,
+            sources=sources,
+            writer=writer,
+            market_day=broker.get_market_day,
+            focus=self.journal_focus,
+            trades=self.journal_trades,
+            config=journal,
+            timezone=self.config.schedule.timezone,
+        )
 
     def make_plan(self, day: date) -> str:
         """The to-do list for the next session. Needs a database: plans must persist."""

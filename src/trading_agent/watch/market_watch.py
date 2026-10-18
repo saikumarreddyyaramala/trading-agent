@@ -65,7 +65,8 @@ class WatchReport(BaseModel):
 
 
 def _pct(value: Decimal) -> Decimal:
-    return value.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    # Adding zero turns a rounded "-0.00" into "0.00".
+    return value.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP) + 0
 
 
 def _headline(text: str) -> str:

@@ -1864,3 +1864,127 @@ def test_run_refuses_a_second_copy(config_dir: Path, monkeypatch: pytest.MonkeyP
     assert "already running" in result.output
     assert calls == []  # the cycle never started
     assert phone.sent == []  # and no "started" alert
+
+
+# ---------- Market journal (ADR 0023) ----------
+
+
+def test_run_starts_the_journal(config_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import threading
+
+    started: list[threading.Event] = []
+
+    class _Journal:
+        def start(self) -> threading.Event:
+            stop = threading.Event()
+            started.append(stop)
+            return stop
+
+    monkeypatch.setattr(Container, "build_journal_recorder", lambda self: _Journal())
+    _use_fake_cycle(monkeypatch, TRADED)
+    result = runner.invoke(cli.app, ["run", "--config-dir", str(config_dir)])
+    assert result.exit_code == 0, result.output
+    assert "Recording the market from 04:00 to the end of post-market" in result.output
+    (stop,) = started
+    assert stop.is_set()
+
+
+def test_journal_command_shows_the_notebook(config_dir: Path, tmp_path: Path) -> None:
+    from datetime import UTC, datetime
+
+    import yaml
+
+    from trading_agent.journal.models import DayNotebook
+    from trading_agent.journal.store import JournalStore
+
+    base = config_dir / "base.yaml"
+    data = yaml.safe_load(base.read_text(encoding="utf-8"))
+    data["journal"]["directory"] = str(tmp_path / "journal")
+    base.write_text(yaml.safe_dump(data), encoding="utf-8")
+
+    missing = runner.invoke(
+        cli.app, ["journal", "--date", "2026-10-19", "--config-dir", str(config_dir)]
+    )
+    assert missing.exit_code == 1
+    assert "No journal for 2026-10-19" in missing.output
+
+    JournalStore(tmp_path / "journal").save_notebook(
+        DayNotebook(
+            day=date(2026, 10, 19),
+            headline="Chips rallied on a policy change.",
+            facts={},
+            created_at=datetime(2026, 10, 20, 0, 20, tzinfo=UTC),
+        )
+    )
+    shown = runner.invoke(
+        cli.app, ["journal", "--date", "2026-10-19", "--config-dir", str(config_dir)]
+    )
+    assert shown.exit_code == 0, shown.output
+    assert "# Day notebook: Mon 2026-10-19" in shown.output
+    assert "Chips rallied on a policy change." in shown.output
+
+
+def test_journal_check_is_a_dry_run(
+    config_dir: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from trading_agent.journal.sources import SourceError, SourceItem
+
+    class _Good:
+        name = "federal_reserve"
+
+        def fetch(self, since: Any) -> list[SourceItem]:
+            return [
+                SourceItem(
+                    id="federal_reserve:abc",
+                    source="federal_reserve",
+                    kind="central_bank",
+                    title="FOMC statement",
+                    summary="",
+                    url=None,
+                    published_at=None,
+                )
+            ]
+
+    class _Bad:
+        name = "bls"
+
+        def fetch(self, since: Any) -> list[SourceItem]:
+            raise SourceError("bls: HTTP 403")
+
+    monkeypatch.setattr(Container, "build_journal_sources", lambda self: [_Good(), _Bad()])
+    monkeypatch.setattr(Container, "build_market_watch", lambda self: _FakeWatch())
+    result = runner.invoke(cli.app, ["journal-check", "--config-dir", str(config_dir)])
+    assert result.exit_code == 0, result.output
+    assert "federal_reserve: 1 item" in result.output
+    assert "FOMC statement" in result.output
+    assert "bls: HTTP 403" in result.output
+    assert "SPY" in result.output
+    assert "Nothing was saved" in result.output
+    assert not (tmp_path / "journal").exists()
+
+
+class _FakeWatch:
+    def scan(self, phase: Any, day: Any, focus: Any) -> Any:
+        from decimal import Decimal
+
+        from trading_agent.watch.market_watch import WatchItem, WatchReport
+
+        items = tuple(
+            WatchItem(
+                symbol=s,
+                reasons=tuple(r),
+                last_price=Decimal("100"),
+                last_trade_at=None,
+                reference_close=Decimal("99"),
+                move_pct=Decimal("1.01"),
+                stale=False,
+                news_count=0,
+                catalysts=(),
+                headlines=(),
+                alert=False,
+            )
+            for s, r in focus.items()
+        )
+        return WatchReport(
+            phase=phase, day=day, created_at=NOW, market=None, items=items, alerts=(), errors=()
+        )

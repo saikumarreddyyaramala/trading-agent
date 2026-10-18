@@ -6,10 +6,11 @@ import json
 import os
 import shutil
 from collections.abc import Iterator, Sequence
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import pytest
 import sqlalchemy as sa
@@ -27,6 +28,7 @@ from trading_agent.domain.models import (
     LLMResponse,
     LLMUsage,
     MarketClock,
+    MarketDay,
     NewsArticle,
     Position,
     Quote,
@@ -98,7 +100,11 @@ class FakeBroker:
         orders_today: int = 0,
         fail_positions: bool = False,
         fail_orders: bool = False,
+        market_days: dict[date, str | None] | None = None,
     ) -> None:
+        # Weekdays 09:30-16:00 New York unless overridden: {day: None} is a holiday,
+        # {day: "13:00"} an early close.
+        self.market_days = market_days or {}
         self._market_open = market_open
         self._equity = Decimal(equity)
         self._cash = Decimal(cash)
@@ -136,6 +142,19 @@ class FakeBroker:
         if self._fail_clock:
             raise RuntimeError("clock unavailable")
         return MarketClock(timestamp=NOW, is_open=self._market_open, next_open=NOW, next_close=NOW)
+
+    def get_market_day(self, day: date) -> MarketDay | None:
+        if self._fail_clock:
+            raise RuntimeError("calendar unavailable")
+        close = self.market_days.get(day, "16:00") if day.weekday() < 5 else None
+        if close is None:
+            return None
+        zone = ZoneInfo("America/New_York")
+        return MarketDay(
+            day=day,
+            open=datetime.combine(day, time(9, 30), tzinfo=zone),
+            close=datetime.combine(day, time.fromisoformat(close), tzinfo=zone),
+        )
 
     def get_positions(self) -> tuple[Position, ...]:
         if self._fail_positions:

@@ -33,6 +33,7 @@ risk engine, executes on a broker, and reports the result against the S&P 500.
 | 19 | Technical analysis: 25+ indicators, readings, intraday, a score part | Done |
 | 20 | Telegram phone alerts, keep-awake, crash restart | Done |
 | 21 | Chat with the bot on Telegram: free answers, AI answers, pause | Done |
+| 22 | All-day market journal (04:00-20:00, watch only) and the day notebook | Done |
 
 ## Architecture
 
@@ -150,6 +151,8 @@ Ready
 | `uv run trading-agent pause` / `resume` | Stop new trades for the rest of today, or lift a pause |
 | `uv run trading-agent alerts-setup` | Find your Telegram chat id for phone alerts |
 | `uv run trading-agent alerts-test` | Send one test alert to your phone |
+| `uv run trading-agent journal` | The day notebook from the market journal (`--date`) |
+| `uv run trading-agent journal-check` | Dry run: every journal source and the market, nothing saved |
 | `uv run trading-agent technicals AAPL` | Every technical indicator with readings (`--json`; free, no LLM) |
 | `uv run trading-agent costs` | What running the system cost, per day, agent, and model (`--days`, `--json`) |
 | `uv run trading-agent dashboard` | The live dashboard on http://127.0.0.1:8765 (read-only) |
@@ -190,6 +193,7 @@ src/trading_agent/
   watch/                 pre-market and after-hours scans
   alerts/                Telegram phone alerts: delivery, dedupe, hourly cap
   chat/                  Telegram chat: plain-word dates, free and AI answers, pause
+  journal/               all-day market journal: sources, snapshots, AI notes, notebook
   planning/              next-day plan and the analyst's morning brief
   dashboard/             read-only dashboard API, news cards, live stream, and the web UI (static/)
   bootstrap.py           composition root
@@ -207,6 +211,7 @@ docs/adr/                architecture decision records
 
 | Step | When | What |
 | --- | --- | --- |
+| journal | 04:00 to 20:00 | records the market every 30 minutes; notes after each session (watch only) |
 | premarket | 08:00 | scan pre-market moves and news for the plan, positions, and movers |
 | preflight | 08:30 | health check; a failure halts new trades for the day |
 | analysis | 08:45 | the analyst reads the morning brief, researches, and proposes one trade or none |
@@ -216,7 +221,8 @@ docs/adr/                architecture decision records
 | manage | every minute | take profit, keep the stop in place |
 | close | 15:50 | force-close and verify the account is flat (earlier on half-days) |
 | reconcile | 16:15 | sync final order statuses and fills |
-| postmarket | 16:45 | scan after-hours moves and news for today's trades and ideas |
+| notebook | 20:20 | the journal's day notebook connects the dots, pre-market to post-market |
+| postmarket | 20:30 | scan after-hours moves and news for today's trades and ideas |
 | reflect | after postmarket | review the day and update the analyst's lessons (never affects trades) |
 | curate | after reflect | judge lessons and playbooks by results; rebuild the guidebook |
 | plan | after curate | the to-do list for the next session, from the day's facts |
@@ -279,6 +285,34 @@ repeated, and open positions keep their broker-side stop-loss.
 
 Only one copy of `trading-agent run` can run at a time: a second one refuses to start
 (two copies would each trade, and Telegram rejects two listeners).
+
+## Market journal and the day notebook
+
+From the start of pre-market (04:00 New York) to the end of post-market (20:00), the bot
+watches and records the market every 30 minutes (ADR 0023). It records:
+- the indexes (SPY, QQQ, IWM, DIA);
+- its own stocks and the day's movers;
+- company news, Federal Reserve releases, government economic numbers, and new
+  presidential documents and significant rules.
+
+Outside regular hours it **only watches**: it never trades there. After each session the
+AI writes a short note. At 20:20 the **day notebook** connects the dots, for example "NVDA
+rose because of this policy news", with its sources and how sure it is. Every cited
+source is checked by code, and a link is a likely explanation, not proof. The evening
+steps (lessons, plan, report) wait until 20:30, so they cover the whole day.
+
+Files, one folder per day:
+
+```
+journal/2026-10-19/premarket.md   premarket.json    pre-market, 04:00-09:30
+                   market.md      market.json       regular session, 09:30-16:00
+                   postmarket.md  postmarket.json   post-market, 16:00-20:00
+                   day.md         day.json          the notebook: the whole day, dots connected
+```
+
+Read today's notebook with `trading-agent journal`. Check every source now, without saving,
+with `trading-agent journal-check`. Holidays are skipped, and early closes end the
+post-market 4 hours after the close.
 
 ## Chat with the bot
 

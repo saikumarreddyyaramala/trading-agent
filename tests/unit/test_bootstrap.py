@@ -467,7 +467,8 @@ def test_trade_history_comes_from_closed_system_trades(config_dir: Path, tmp_pat
     store = container.build_audit_store()
     run = "daily-20261015"
     store.start_run(run, "daily")
-    when = datetime.now(UTC) - timedelta(days=1)
+    # Midday yesterday: the buy and the sell must fall on the same market day.
+    when = datetime.now(UTC).replace(hour=15, minute=0, second=0, microsecond=0) - timedelta(days=1)
 
     def order(cid: str, side: str, price: str, minutes: int) -> BrokerOrder:
         return BrokerOrder(
@@ -818,3 +819,44 @@ def test_chat_data_finds_the_next_plan(config_dir: Path, tmp_path: Path) -> None
     assert plan["for_day"] == "2026-10-19"
     assert plan["items"][0]["text"] == "Fix the thing."
     assert data.plan(monday)["for_day"] == "2026-10-19"
+
+
+# ---------- Market journal (ADR 0023) ----------
+
+
+def test_the_journal_is_built_with_every_free_source(config_dir: Path) -> None:
+    container = Container(config=load_config("paper", config_dir), secrets=make_secrets())
+    recorder = container.build_journal_recorder()
+    assert recorder is not None
+    names = {s.name for s in container.build_journal_sources()}
+    assert names == {"company_news", "federal_reserve", "bls", "federal_register"}
+
+
+def test_journal_sources_follow_the_config(config_dir: Path) -> None:
+    loaded = load_config("paper", config_dir)
+    journal = loaded.journal.model_copy(
+        update={"sources": loaded.journal.sources.model_copy(update={"bls": False})}
+    )
+    container = Container(
+        config=loaded.model_copy(update={"journal": journal}), secrets=make_secrets()
+    )
+    assert "bls" not in {s.name for s in container.build_journal_sources()}
+
+
+def test_no_journal_when_switched_off_or_without_market_data(config_dir: Path) -> None:
+    loaded = load_config("paper", config_dir)
+    off = loaded.model_copy(
+        update={"journal": loaded.journal.model_copy(update={"enabled": False})}
+    )
+    assert Container(config=off, secrets=make_secrets()).build_journal_recorder() is None
+    no_keys = make_secrets(alpaca_api_key=None, alpaca_secret_key=None)
+    assert Container(config=loaded, secrets=no_keys).build_journal_recorder() is None
+
+
+def test_the_journal_records_without_ai_when_no_llm_key(config_dir: Path) -> None:
+    secrets = make_secrets(openai_api_key=None)
+    recorder = Container(
+        config=load_config("paper", config_dir), secrets=secrets
+    ).build_journal_recorder()
+    assert recorder is not None
+    assert recorder._writer is None

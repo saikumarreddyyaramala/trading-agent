@@ -8,7 +8,7 @@ without touching the core.
 from __future__ import annotations
 
 from collections.abc import Sequence
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Protocol, runtime_checkable
 
@@ -21,6 +21,7 @@ from trading_agent.domain.models import (
     LLMRequest,
     LLMResponse,
     MarketClock,
+    MarketDay,
     Mover,
     NewsArticle,
     PortfolioHistory,
@@ -43,6 +44,10 @@ class BrokerPort(Protocol):
     def get_account(self) -> AccountSnapshot: ...
 
     def get_clock(self) -> MarketClock: ...
+
+    def get_market_day(self, day: date) -> MarketDay | None:
+        """The regular session on `day`, or None when the market is closed all day."""
+        ...
 
     def get_positions(self) -> tuple[Position, ...]: ...
 

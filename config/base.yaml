@@ -18,10 +18,11 @@ schedule:
   # Extra analysis-and-entry slots (ADR 0015). How many run is capped by
   # risk.max_trades_per_day, so with 1 trade a day (live) they never run.
   extra_analyses: ["10:30", "12:00"]
-  # Market watch (ADR 0016): pre-market scan before the pre-flight; after-hours scan and
-  # the next-day plan once the session is over.
+  # Market watch (ADR 0016): pre-market scan before the pre-flight. The evening steps
+  # (after-hours scan, lessons, guidebook, next-day plan, report) wait until the post-market
+  # is over (20:00), so they cover the whole day (ADR 0023). The journal records all day.
   premarket_watch: "08:00"
-  post_market: "16:45"
+  post_market: "20:30"
 
 risk:
   max_trades_per_day: 1
@@ -201,3 +202,24 @@ chat:
   max_ai_answers_per_day: 30   # free answers are unlimited
   max_message_age_hours: 12    # older messages, sent while the bot was off, are skipped
   pause_file: data/pause.json
+
+# Market journal (ADR 0023): from the start of pre-market (04:00) to the end of post-market
+# (20:00, or 4 hours after an early close) it watches and records the market, the bot's
+# stocks, and the news, every 30 minutes. It only watches: no trades outside regular
+# hours. An AI note follows each session and a day notebook connects the dots at 20:20.
+# Files: journal/<day>/premarket, market, postmarket, day (.md to read, .json for data).
+journal:
+  enabled: true
+  directory: journal
+  pre_market_start: "04:00"
+  post_market_hours: 4          # post-market ends this long after the close
+  snapshot_minutes: 30
+  market_symbols: [SPY, QQQ, IWM, DIA]
+  ai_notes: true                # an AI note per session and the AI notebook (about 4 calls a day)
+  notebook_delay_minutes: 20
+  max_sources_in_prompt: 60
+  sources:                      # free sources; a paid one can be added later
+    company_news: true          # Alpaca / Benzinga
+    federal_reserve: true       # Fed press releases
+    bls: true                   # Bureau of Labor Statistics latest numbers
+    federal_register: true      # presidential documents and significant rules

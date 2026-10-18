@@ -30,6 +30,8 @@ from trading_agent.execution.executor import (
     ManageResult,
 )
 from trading_agent.health import CheckStatus, format_age, overall_ok, run_healthchecks
+from trading_agent.journal.sources import fetch_all
+from trading_agent.journal.store import JournalStore
 from trading_agent.learning.service import LearningError
 from trading_agent.mcp_server.server import build_server
 from trading_agent.mcp_server.tools import ResearchToolError
@@ -692,6 +694,17 @@ def _run_cycle(container: Container, once: bool) -> None:
             typer.echo("Answering your Telegram messages (send the bot: help).")
     except Exception as exc:  # chat is a convenience: it never stops the cycle
         typer.secho(f"Telegram chat is off: {exc}", fg=typer.colors.YELLOW, err=True)
+    journal_stop = None
+    try:
+        journal = container.build_journal_recorder()
+        if journal is not None:
+            journal_stop = journal.start()
+            typer.echo(
+                "Recording the market from 04:00 to the end of post-market (watch only); "
+                f"notebook in {container.config.journal.directory}/."
+            )
+    except Exception as exc:  # the journal only records: it never stops the cycle
+        typer.secho(f"Market journal is off: {exc}", fg=typer.colors.YELLOW, err=True)
     code = 0
     try:
         with keep_awake(tuning.keep_awake) as awake:
@@ -711,8 +724,9 @@ def _run_cycle(container: Container, once: bool) -> None:
             "Restart `trading-agent run` to resume, or run `trading-agent manage`."
         )
     finally:
-        if chat_stop is not None:
-            chat_stop.set()
+        for stop in (chat_stop, journal_stop):
+            if stop is not None:
+                stop.set()
     raise typer.Exit(code=code)
 
 
@@ -745,6 +759,69 @@ def resume(env: EnvOption = None, config_dir: ConfigDirOption = None) -> None:
         typer.echo("Trading resumed: new trades are allowed again today.")
     else:
         typer.echo("Trading was not paused.")
+
+
+@app.command()
+def journal(
+    day: Annotated[
+        str | None, typer.Option("--date", help="The day to show (default: today).")
+    ] = None,
+    env: EnvOption = None,
+    config_dir: ConfigDirOption = None,
+) -> None:
+    """The day notebook from the market journal (ADR 0023), or what was recorded so far."""
+    container = _container(env, config_dir)
+    zone = ZoneInfo(container.config.schedule.timezone)
+    try:
+        when = date.fromisoformat(day) if day else datetime.now(zone).date()
+    except ValueError as exc:
+        typer.secho(f"Invalid date: {day}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=2) from exc
+    store = JournalStore(Path(container.config.journal.directory))
+    notebook = store.folder(when) / "day.md"
+    if notebook.exists():
+        typer.echo(notebook.read_text(encoding="utf-8"))
+        return
+    found = sorted(store.folder(when).glob("*.md")) if store.folder(when).exists() else []
+    if not found:
+        typer.echo(f"No journal for {when}.")
+        raise typer.Exit(code=1)
+    typer.echo(f"No notebook yet for {when}; recorded so far:")
+    for path in found:
+        typer.echo(f"  {path}")
+
+
+@app.command("journal-check")
+def journal_check(env: EnvOption = None, config_dir: ConfigDirOption = None) -> None:
+    """A dry run of the journal now: fetch every source and scan the market once. Saves
+    nothing and uses no AI (ADR 0023)."""
+    container = _container(env, config_dir)
+    zone = ZoneInfo(container.config.schedule.timezone)
+    now = datetime.now(zone)
+    try:
+        sources = container.build_journal_sources()
+        watch = container.build_market_watch()
+    except ConfigError as exc:
+        typer.secho(f"Configuration error: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=2) from exc
+    typer.echo("Sources (last 24 hours):")
+    for source in sources:
+        items, errors = fetch_all([source], now - timedelta(hours=24))
+        for error in errors:
+            typer.secho(f"  {error}", fg=typer.colors.YELLOW)
+        if not errors:
+            typer.echo(f"  {source.name}: {len(items)} item{'s' if len(items) != 1 else ''}")
+            for item in items[:3]:
+                typer.echo(f"    - {item.title[:100]}")
+    focus = {s: ["market"] for s in container.config.journal.market_symbols}
+    report = watch.scan("pre", now.date(), focus)
+    typer.echo("Market (against the last close):")
+    for watched in report.items:
+        move = "n/a" if watched.move_pct is None else f"{watched.move_pct:+.2f}%"
+        typer.echo(f"  {watched.symbol:<5} {move}")
+    for error in report.errors:
+        typer.secho(f"  {error}", fg=typer.colors.YELLOW)
+    typer.echo("Nothing was saved and no AI was used.")
 
 
 @app.command("alerts-setup")

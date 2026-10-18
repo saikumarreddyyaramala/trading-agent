@@ -302,7 +302,7 @@ def test_repo_config_watch(config_dir: Path) -> None:
 
     config = load_config("paper", config_dir)
     assert config.schedule.premarket_watch == time(8, 0)
-    assert config.schedule.post_market == time(16, 45)
+    assert config.schedule.post_market == time(20, 30)  # after the post-market (ADR 0023)
     assert config.watch.enabled
     assert config.watch.gap_alert_pct == Decimal(3)
 

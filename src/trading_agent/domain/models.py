@@ -6,7 +6,7 @@ so every adapter (Alpaca, Anthropic, ...) translates into and out of them.
 
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date, datetime, time
 from decimal import Decimal
 from typing import Any, Literal
 
@@ -57,6 +57,18 @@ class MarketClock(_Frozen):
     is_open: bool
     next_open: datetime
     next_close: datetime
+
+
+class MarketDay(_Frozen):
+    """One trading day's regular session, in market time (holidays have none)."""
+
+    day: date
+    open: datetime
+    close: datetime
+
+    @property
+    def early_close(self) -> bool:
+        return self.close.time() < time(16, 0)
 
 
 class Position(_Frozen):

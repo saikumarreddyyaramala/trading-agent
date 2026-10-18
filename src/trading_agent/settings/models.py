@@ -39,7 +39,7 @@ class ScheduleConfig(_Strict):
     # Market watch (ADR 0016): a pre-market scan before the pre-flight, and an after-hours
     # scan followed by the next-day plan once the session is over.
     premarket_watch: time = time(8, 0)
-    post_market: time = time(16, 45)
+    post_market: time = time(20, 30)  # after the post-market ends at 20:00 (ADR 0023)
 
     @field_validator("timezone")
     @classmethod
@@ -337,6 +337,31 @@ ALERT_KINDS: tuple[AlertKind, ...] = (
 )
 
 
+class JournalSourcesConfig(_Strict):
+    """Where the journal looks for the "why" (ADR 0023). All free; a paid one can be added."""
+
+    company_news: bool = True  # Alpaca / Benzinga
+    federal_reserve: bool = True  # press releases (RSS)
+    bls: bool = True  # Bureau of Labor Statistics latest numbers (RSS)
+    federal_register: bool = True  # presidential documents and significant rules
+
+
+class JournalConfig(_Strict):
+    """The all-day market journal and the day notebook (ADR 0023). It only watches and
+    records, from the start of pre-market to the end of post-market; it never trades."""
+
+    enabled: bool = True
+    directory: str = "journal"
+    pre_market_start: time = time(4, 0)  # market time
+    post_market_hours: int = Field(default=4, ge=1, le=6)  # after the close: 20:00 normally
+    snapshot_minutes: int = Field(default=30, ge=5, le=120)
+    market_symbols: tuple[str, ...] = ("SPY", "QQQ", "IWM", "DIA")
+    ai_notes: bool = True  # a short AI note after each session, and the AI notebook
+    notebook_delay_minutes: int = Field(default=20, ge=0, le=120)
+    max_sources_in_prompt: int = Field(default=60, ge=5, le=200)
+    sources: JournalSourcesConfig = JournalSourcesConfig()
+
+
 class ChatConfig(_Strict):
     """Chatting with the bot over Telegram (ADR 0022). Only the chat in TELEGRAM_CHAT_ID is
     answered. Common questions are answered free from the records; others use the AI."""
@@ -404,6 +429,7 @@ class AppConfig(_Strict):
     costs: CostsConfig = CostsConfig()
     alerts: AlertsConfig = AlertsConfig()
     chat: ChatConfig = ChatConfig()
+    journal: JournalConfig = JournalConfig()
 
     @model_validator(mode="after")
     def _environment_matches_broker(self) -> AppConfig:

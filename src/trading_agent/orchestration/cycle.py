@@ -343,13 +343,13 @@ class DailyCycle:
         else:
             status, summary = "no_trade", "; ".join([first, *notes])
         self._record("run result", lambda s: s.finish_run(run_id, status, summary))
+        if not finished_before:  # the trading result goes out at the close, not at night
+            self._alert("report", f"{day}: {status}. {summary}")
         self._side_step(run_id, "postmarket", self._services.postmarket, session, done)
         self._reflect(run_id, session, done)  # never affects the day's trades or result
         self._side_step(run_id, "curate", self._services.curate, session, done)
         self._side_step(run_id, "plan", self._services.plan, session, done)
         self._report(run_id, session, done)  # after the result, so the report includes it
-        if not finished_before:
-            self._alert("report", f"{day}: {status}. {summary}")
         self._log.info("cycle.day_finished", run_id=run_id, status=status, summary=summary)
         return DayResult(
             run_id=run_id, day=day, status=status, summary=summary, steps=dict(self._steps[run_id])
