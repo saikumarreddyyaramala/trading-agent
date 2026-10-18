@@ -112,6 +112,8 @@ class CycleServices:
     curate: Callable[[date], str] | None = None
     # Phone alerts (ADR 0021): (kind, text). Must never raise; guarded anyway.
     alert: Callable[[str, str], object] | None = None
+    # A reason when new trades are paused for today (from chat, ADR 0022), else None.
+    paused: Callable[[], str | None] | None = None
 
 
 @dataclass(frozen=True)
@@ -233,6 +235,15 @@ class DailyCycle:
         except Exception as exc:  # an alert never changes what the cycle does
             self._log.warning("cycle.alert_failed", kind=kind, error=str(exc))
 
+    def _pause_reason(self) -> str | None:
+        if self._services.paused is None:
+            return None
+        try:
+            return self._services.paused()
+        except Exception as exc:  # the kill switch is the hard control; this one is a convenience
+            self._log.warning("cycle.pause_check_failed", error=str(exc))
+            return None
+
     def _step(self, run_id: str, step: str, status: str, detail: str, started: datetime) -> None:
         self._steps.setdefault(run_id, {})[step] = status
         self._details.setdefault(run_id, {})[step] = detail
@@ -297,7 +308,9 @@ class DailyCycle:
         if not audit_ok and self._services.recorder.required:
             halted = True  # no record, no trade
         brief = None if halted or "analysis" in done else self._brief(session)
-        proposal, calls = self._analysis(run_id, session, done, halted, context=brief)
+        proposal, calls = self._analysis(
+            run_id, session, done, halted, context=brief, skip=self._pause_reason()
+        )
         proposal = self._critique(run_id, done, proposal, calls)
         traded = self._entry(run_id, session, done, halted, proposal)
         bought = [proposal.symbol] if traded and proposal and proposal.symbol else []
@@ -371,6 +384,7 @@ class DailyCycle:
         *,
         at: datetime | None = None,
         context: str | None = None,
+        skip: str | None = None,
     ) -> tuple[TradeProposal | None, list[ToolCallRecord]]:
         """The verified proposal, if any, and the tool calls that produced its evidence."""
         if "analysis" in done:
@@ -380,8 +394,8 @@ class DailyCycle:
             except AuditError:
                 return None, []
         started = self._now()
-        if halted:
-            self._step(run_id, "analysis", "skipped", "trading halted", started)
+        if halted or skip:
+            self._step(run_id, "analysis", "skipped", skip or "trading halted", started)
             return None, []
         if self._now() >= session.trade_end:
             self._step(run_id, "analysis", "skipped", "too late: trade window over", started)
@@ -443,6 +457,9 @@ class DailyCycle:
         started = self._now()
         if halted:
             self._step(run_id, "entry", "skipped", "trading halted", started)
+            return None
+        if paused := self._pause_reason():
+            self._step(run_id, "entry", "skipped", paused, started)
             return None
         if proposal is None:
             reason = (
@@ -526,6 +543,8 @@ class DailyCycle:
         reason = None
         if halted:
             reason = "trading halted"
+        elif paused := self._pause_reason():
+            reason = paused
         elif self._now() >= session.trade_end:
             reason = "too late: trade window over"
         elif self._services.capacity is not None:

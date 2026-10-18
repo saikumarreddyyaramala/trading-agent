@@ -335,6 +335,20 @@ ALERT_KINDS: tuple[AlertKind, ...] = (
 )
 
 
+class ChatConfig(_Strict):
+    """Chatting with the bot over Telegram (ADR 0022). Only the chat in TELEGRAM_CHAT_ID is
+    answered. Common questions are answered free from the records; others use the AI."""
+
+    enabled: bool = True
+    ai_answers: bool = True
+    # AI answers allowed per day (market time); free answers are unlimited.
+    max_ai_answers_per_day: int = Field(default=30, ge=0, le=500)
+    # Messages older than this (sent while the bot was off) are skipped, not answered.
+    max_message_age_hours: int = Field(default=12, ge=1, le=72)
+    # Where "pause" is remembered; it ends by itself at midnight (market time).
+    pause_file: str = "data/pause.json"
+
+
 class AlertsConfig(_Strict):
     """Phone alerts over Telegram (ADR 0021). Needs TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID
     (secrets); without them alerts are silently off."""
@@ -387,6 +401,7 @@ class AppConfig(_Strict):
     guidebook: GuidebookConfig = GuidebookConfig()
     costs: CostsConfig = CostsConfig()
     alerts: AlertsConfig = AlertsConfig()
+    chat: ChatConfig = ChatConfig()
 
     @model_validator(mode="after")
     def _environment_matches_broker(self) -> AppConfig:

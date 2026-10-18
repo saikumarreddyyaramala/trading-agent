@@ -22,6 +22,10 @@ from trading_agent.agents.critic import CriticAgent, CriticResult
 from trading_agent.agents.playbooks import PlaybookWriter
 from trading_agent.agents.reflection import Reflector
 from trading_agent.alerts import Alerter, TelegramClient
+from trading_agent.chat.bot import ChatBot
+from trading_agent.chat.listener import ChatListener
+from trading_agent.chat.pause import PauseStore
+from trading_agent.chat.records import ChatRecords
 from trading_agent.costs import CostLedger, CostReport, cost_report
 from trading_agent.dashboard.data import DashboardData
 from trading_agent.data.alpaca_market_data import AlpacaMarketData
@@ -340,6 +344,7 @@ class Container:
             brief=self.brief,
             curate=self.curate if self.config.guidebook.enabled else None,
             alert=self.alerter.notify,
+            paused=self.paused_today,
         )
 
     # ---------- Market watch and the next-day plan (ADR 0016) ----------
@@ -405,7 +410,7 @@ class Container:
 
         return Planner(store, self.config, next_session=next_session).plan(day).summary
 
-    def build_dashboard_data(self) -> DashboardData:
+    def build_dashboard_data(self, store: AuditStore | None = None) -> DashboardData:
         """The dashboard's read-only data layer (ADR 0018). Missing keys leave a section
         empty with a reason, so the dashboard opens even before the keys are set."""
 
@@ -416,7 +421,7 @@ class Container:
                 return None
 
         return DashboardData(
-            self.build_audit_store(),
+            store or self.build_audit_store(),
             self.config,
             broker=optional(self.build_broker),
             market_data=optional(self.build_market_data),
@@ -443,15 +448,58 @@ class Container:
         value = self.secrets.telegram_bot_token
         return value.get_secret_value() if value and value.get_secret_value() else None
 
+    def telegram_chat_id(self) -> str | None:
+        value = self.secrets.telegram_chat_id
+        return value.get_secret_value() if value and value.get_secret_value() else None
+
     @cached_property
     def alerter(self) -> Alerter:
         """One alerter per process, so its dedupe and hourly cap cover every alert.
         Silently off unless both TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID are set."""
-        token = self.telegram_token()
-        chat = self.secrets.telegram_chat_id
-        chat_id = chat.get_secret_value() if chat and chat.get_secret_value() else None
+        token, chat_id = self.telegram_token(), self.telegram_chat_id()
         sender = TelegramClient(token, chat_id) if token and chat_id else None
         return Alerter(sender, self.config.alerts, label=self.config.environment.value)
+
+    # ---------- Chat (ADR 0022) ----------
+
+    def pause_store(self) -> PauseStore:
+        return PauseStore(Path(self.config.chat.pause_file))
+
+    def paused_today(self) -> str | None:
+        today = datetime.now(ZoneInfo(self.config.schedule.timezone)).date()
+        return self.pause_store().paused_reason(today)
+
+    def build_chat_data(self) -> ChatRecords:
+        store = self.build_audit_store()
+        return ChatRecords(
+            store, self.build_dashboard_data(store), self.build_report_builder(store)
+        )
+
+    def build_chat_bot(self) -> ChatBot:
+        """Free answers always; AI answers when an LLM key is set (its own cost, 'chat')."""
+        try:
+            complete = self.build_llm_gateway().complete
+        except ConfigError:
+            complete = None
+        return ChatBot(
+            self.build_chat_data(),
+            self.pause_store(),
+            self.config.chat,
+            complete=complete,
+            timezone=self.config.schedule.timezone,
+        )
+
+    def build_chat_listener(self) -> ChatListener | None:
+        """None unless chat is enabled and both Telegram secrets are set."""
+        token, chat_id = self.telegram_token(), self.telegram_chat_id()
+        if not self.config.chat.enabled or token is None or chat_id is None:
+            return None
+        return ChatListener(
+            TelegramClient(token, chat_id),
+            chat_id,
+            self.build_chat_bot(),
+            max_age=timedelta(hours=self.config.chat.max_message_age_hours),
+        )
 
     def report_webhook_url(self) -> str | None:
         value = self.secrets.report_webhook_url

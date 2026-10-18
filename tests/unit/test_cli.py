@@ -1781,3 +1781,66 @@ def test_alerts_test_without_telegram(config_dir: Path) -> None:
     result = runner.invoke(cli.app, ["alerts-test", "--config-dir", str(config_dir)])
     assert result.exit_code == 2
     assert "alerts-setup" in result.output
+
+
+# ---------- Chat (ADR 0022) ----------
+
+
+def test_run_starts_the_chat_listener(config_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import threading
+
+    started: list[threading.Event] = []
+
+    class _Listener:
+        def start(self) -> threading.Event:
+            stop = threading.Event()
+            started.append(stop)
+            return stop
+
+    monkeypatch.setattr(Container, "build_chat_listener", lambda self: _Listener())
+    _use_fake_cycle(monkeypatch, TRADED)
+    result = runner.invoke(cli.app, ["run", "--config-dir", str(config_dir)])
+    assert result.exit_code == 0, result.output
+    assert "Answering your Telegram messages" in result.output
+    (stop,) = started
+    assert stop.is_set()  # stopped when the cycle stopped
+
+
+def test_run_without_chat_says_nothing_about_it(
+    config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _use_fake_cycle(monkeypatch, TRADED)
+    result = runner.invoke(cli.app, ["run", "--config-dir", str(config_dir)])
+    assert "Telegram messages" not in result.output
+
+
+def test_pause_and_resume_from_the_computer(config_dir: Path, tmp_path: Path) -> None:
+    import yaml
+
+    base = config_dir / "base.yaml"
+    data = yaml.safe_load(base.read_text(encoding="utf-8"))
+    data["chat"]["pause_file"] = str(tmp_path / "pause.json")
+    base.write_text(yaml.safe_dump(data), encoding="utf-8")
+
+    paused = runner.invoke(cli.app, ["pause", "--config-dir", str(config_dir)])
+    assert paused.exit_code == 0, paused.output
+    assert "No new trades for the rest of today" in paused.output
+    assert (tmp_path / "pause.json").exists()
+    resumed = runner.invoke(cli.app, ["resume", "--config-dir", str(config_dir)])
+    assert "Trading resumed" in resumed.output
+    assert not (tmp_path / "pause.json").exists()
+    again = runner.invoke(cli.app, ["resume", "--config-dir", str(config_dir)])
+    assert "was not paused" in again.output
+
+
+def test_chat_command_answers_like_the_bot(
+    config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class _Bot:
+        def reply(self, text: str) -> str:
+            return f"you said {text}"
+
+    monkeypatch.setattr(Container, "build_chat_bot", lambda self: _Bot())
+    result = runner.invoke(cli.app, ["chat", "hi", "there", "--config-dir", str(config_dir)])
+    assert result.exit_code == 0, result.output
+    assert "you said hi there" in result.output

@@ -673,6 +673,14 @@ def run(
     alerter = container.alerter
     tuning = container.config.orchestration
     alerter.notify("start", "Trading cycle started.")
+    chat_stop = None
+    try:
+        listener = container.build_chat_listener()
+        if listener is not None:
+            chat_stop = listener.start()
+            typer.echo("Answering your Telegram messages (send the bot: help).")
+    except Exception as exc:  # chat is a convenience: it never stops the cycle
+        typer.secho(f"Telegram chat is off: {exc}", fg=typer.colors.YELLOW, err=True)
     code = 0
     try:
         with keep_awake(tuning.keep_awake) as awake:
@@ -691,7 +699,41 @@ def run(
             "Stopped. Open positions keep their broker-side stop-loss. "
             "Restart `trading-agent run` to resume, or run `trading-agent manage`."
         )
+    finally:
+        if chat_stop is not None:
+            chat_stop.set()
     raise typer.Exit(code=code)
+
+
+@app.command()
+def chat(
+    message: Annotated[list[str], typer.Argument(help="What to ask, e.g. report last wednesday")],
+    env: EnvOption = None,
+    config_dir: ConfigDirOption = None,
+) -> None:
+    """Ask the bot something, as you would on Telegram (ADR 0022). Free-form questions use
+    the AI; common ones are free."""
+    container = _container(env, config_dir)
+    typer.echo(container.build_chat_bot().reply(" ".join(message)))
+
+
+@app.command()
+def pause(env: EnvOption = None, config_dir: ConfigDirOption = None) -> None:
+    """Stop new trades for the rest of today (exits still run). Ends by itself tomorrow."""
+    container = _container(env, config_dir)
+    today = datetime.now(ZoneInfo(container.config.schedule.timezone)).date()
+    container.pause_store().pause(today, by="the computer")
+    typer.echo(f"Paused. No new trades for the rest of today ({today}); exits still run.")
+
+
+@app.command()
+def resume(env: EnvOption = None, config_dir: ConfigDirOption = None) -> None:
+    """Lift a pause set from chat or with `trading-agent pause`."""
+    container = _container(env, config_dir)
+    if container.pause_store().resume():
+        typer.echo("Trading resumed: new trades are allowed again today.")
+    else:
+        typer.echo("Trading was not paused.")
 
 
 @app.command("alerts-setup")

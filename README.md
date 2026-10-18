@@ -32,6 +32,7 @@ risk engine, executes on a broker, and reports the result against the S&P 500.
 | 18 | Dashboard UI: live, Robinhood-inspired local web app | Done |
 | 19 | Technical analysis: 25+ indicators, readings, intraday, a score part | Done |
 | 20 | Telegram phone alerts, keep-awake, crash restart | Done |
+| 21 | Chat with the bot on Telegram: free answers, AI answers, pause | Done |
 
 ## Architecture
 
@@ -145,6 +146,8 @@ Ready
 | `uv run trading-agent evaluate-critic` | Replay the current critic over recorded proposals (uses tokens) |
 | `uv run trading-agent watch AAPL --phase pre` | Scan pre-market (or `post`) moves, news, and catalysts now |
 | `uv run trading-agent plan` | The to-do list the last session left for today (`--date`) |
+| `uv run trading-agent chat report last wednesday` | Ask the bot something, as on Telegram |
+| `uv run trading-agent pause` / `resume` | Stop new trades for the rest of today, or lift a pause |
 | `uv run trading-agent alerts-setup` | Find your Telegram chat id for phone alerts |
 | `uv run trading-agent alerts-test` | Send one test alert to your phone |
 | `uv run trading-agent technicals AAPL` | Every technical indicator with readings (`--json`; free, no LLM) |
@@ -186,6 +189,7 @@ src/trading_agent/
   costs/                 cost ledger: exact pricing, daily budget, summaries
   watch/                 pre-market and after-hours scans
   alerts/                Telegram phone alerts: delivery, dedupe, hourly cap
+  chat/                  Telegram chat: plain-word dates, free and AI answers, pause
   planning/              next-day plan and the analyst's morning brief
   dashboard/             read-only dashboard API, news cards, live stream, and the web UI (static/)
   bootstrap.py           composition root
@@ -272,6 +276,25 @@ power settings, and closing a laptop lid still sleeps it, so keep the lid open o
 in. If the cycle crashes, it restarts by itself after a short, growing pause. After
 5 crashes in an hour, it stops and tells you. Restarting is safe: finished steps are never
 repeated, and open positions keep their broker-side stop-loss.
+
+## Chat with the bot
+
+Once alerts are set up, you can message the bot on Telegram while `trading-agent run` is
+running (ADR 0022). It answers only your chat; anyone else is ignored. Try:
+- `hi`
+- `positions`
+- `report last wednesday`
+- `trades this week`
+- `costs`
+- `plan`
+- `help`
+
+Those answers are free. Anything else ("why didn't you trade on Tuesday?") is answered by
+the AI from the bot's own records, up to 30 answers a day.
+
+Chat cannot trade: buy and sell requests are refused. The one action is `pause`, which
+stops new trades for the rest of the day while open positions keep being managed. It ends
+by itself the next day, or run `trading-agent resume` on the computer.
 
 ## Dashboard
 

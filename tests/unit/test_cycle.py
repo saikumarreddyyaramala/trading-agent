@@ -1298,3 +1298,48 @@ def test_a_broken_alert_never_affects_the_day(tmp_path: Path) -> None:
     result = _rebuild(h, alert=_boom).run_day(THURSDAY)
     assert result.status == "traded"
     assert result.steps["close"] == "ok"
+
+
+# ---------- Pause from chat (ADR 0022) ----------
+
+
+def _paused(h: Harness) -> DailyCycle:
+    return _rebuild(h, paused=lambda: "paused from telegram for 2026-10-15")
+
+
+def test_a_pause_skips_the_analysis_and_the_entry(tmp_path: Path) -> None:
+    h = Harness(tmp_path)
+    result = _paused(h).run_day(THURSDAY)
+    assert not h.called("analyze")  # no tokens spent
+    assert h.executor.count("enter") == 0
+    assert result.steps["analysis"] == "skipped"
+    assert result.steps["entry"] == "skipped"
+    (entry,) = [s for s in h.rows(schema.run_steps) if s["step"] == "entry"]
+    assert entry["detail"] == "paused from telegram for 2026-10-15"
+    assert result.steps["close"] == "ok"  # exits and the close still run
+    assert result.status == "no_trade"
+
+
+def test_a_pause_during_the_day_blocks_the_entry_and_the_slots(tmp_path: Path) -> None:
+    config = AppConfig.model_validate({"risk": {"max_trades_per_day": 3}})
+    h = Harness(tmp_path, config=config)
+    paused: list[str] = []
+    _rebuild(h, paused=lambda: paused[0] if paused else None)
+    original = h.services.analyze
+
+    def analyze_then_pause(run_id: str, context: str | None = None) -> AnalystResult:
+        result = original(run_id, context)
+        paused.append("paused from telegram for 2026-10-15")
+        return result
+
+    _rebuild(h, analyze=analyze_then_pause)
+    result = h.cycle.run_day(THURSDAY)
+    assert h.executor.count("enter") == 0
+    assert result.steps["entry"] == "skipped"
+    assert all(v == "skipped" for k, v in result.steps.items() if k.startswith("slot"))
+
+
+def test_a_broken_pause_check_does_not_block_trading(tmp_path: Path) -> None:
+    h = Harness(tmp_path)
+    result = _rebuild(h, paused=_boom).run_day(THURSDAY)
+    assert result.status == "traded"

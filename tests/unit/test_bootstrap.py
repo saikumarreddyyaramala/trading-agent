@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import pytest
 from pydantic import SecretStr
@@ -749,3 +750,71 @@ def test_the_cycle_alerts_through_the_containers_alerter(config_dir: Path) -> No
     container = Container(config=load_config("paper", config_dir), secrets=make_secrets())
     services = container.build_cycle_services()
     assert services.alert == container.alerter.notify
+
+
+# ---------- Chat (ADR 0022) ----------
+
+
+def _telegram(config_dir: Path, **config: Any) -> Container:
+    loaded = load_config("paper", config_dir)
+    if config:
+        loaded = loaded.model_copy(update={"chat": loaded.chat.model_copy(update=config)})
+    return Container(
+        config=loaded,
+        secrets=make_secrets(
+            telegram_bot_token=SecretStr("1:abc"), telegram_chat_id=SecretStr("42")
+        ),
+    )
+
+
+def test_no_chat_without_telegram(config_dir: Path) -> None:
+    container = Container(config=load_config("paper", config_dir), secrets=make_secrets())
+    assert container.build_chat_listener() is None
+
+
+def test_chat_can_be_switched_off(config_dir: Path) -> None:
+    assert _telegram(config_dir, enabled=False).build_chat_listener() is None
+
+
+def test_chat_listener_answers_only_the_configured_chat(config_dir: Path) -> None:
+    listener = _telegram(config_dir).build_chat_listener()
+    assert listener is not None
+    assert listener._owner == "42"
+
+
+def test_the_cycle_checks_the_chat_pause(config_dir: Path, tmp_path: Path) -> None:
+    container = _telegram(config_dir, pause_file=str(tmp_path / "pause.json"))
+    services = container.build_cycle_services()
+    assert services.paused is not None
+    assert services.paused() is None
+    today = datetime.now(ZoneInfo(container.config.schedule.timezone)).date()
+    container.pause_store().pause(today, by="telegram")
+    assert services.paused() == f"paused from telegram for {today.isoformat()}"
+
+
+def test_chat_data_finds_the_next_plan(config_dir: Path, tmp_path: Path) -> None:
+    from trading_agent.domain.models import DayPlan, PlanItem
+    from trading_agent.storage.database import make_engine, upgrade
+
+    url = f"sqlite:///{tmp_path / 'audit.db'}"
+    upgrade(make_engine(url))
+    secrets = make_secrets(database_url=SecretStr(url))
+    container = Container(config=load_config("paper", config_dir), secrets=secrets)
+    data = container.build_chat_data()
+    friday, monday = date(2026, 10, 16), date(2026, 10, 19)
+    assert data.plan(date(2026, 10, 17)) is None
+    data._store.record_plan(  # type: ignore[attr-defined]
+        None,
+        DayPlan(
+            source_day=friday,
+            for_day=monday,
+            created_at=datetime(2026, 10, 16, 21, tzinfo=UTC),
+            items=(PlanItem(kind="ops", text="Fix the thing.", priority=1),),
+            summary="1 item",
+        ),
+    )
+    plan = data.plan(date(2026, 10, 17))  # Saturday: the plan Friday made for Monday
+    assert plan is not None
+    assert plan["for_day"] == "2026-10-19"
+    assert plan["items"][0]["text"] == "Fix the thing."
+    assert data.plan(monday)["for_day"] == "2026-10-19"

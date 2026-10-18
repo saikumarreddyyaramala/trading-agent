@@ -190,3 +190,13 @@ alerts:
   events: [start, trade, exit, failure, halt, report, crash]
   dedupe_minutes: 60           # the same message is not repeated within this window
   max_per_hour: 20             # a flood of alerts is cut off here
+
+# Chat with the bot on Telegram (ADR 0022): ask "status", "report last wednesday",
+# "trades this week", or anything else. Only your TELEGRAM_CHAT_ID is answered. Nothing in
+# chat can trade; "pause" stops new trades for the rest of the day.
+chat:
+  enabled: true
+  ai_answers: true             # free-form questions use the AI (about a cent each)
+  max_ai_answers_per_day: 30   # free answers are unlimited
+  max_message_age_hours: 12    # older messages, sent while the bot was off, are skipped
+  pause_file: data/pause.json

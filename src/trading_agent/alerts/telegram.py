@@ -28,8 +28,10 @@ class TelegramClient:
     def __repr__(self) -> str:  # never show the token
         return "TelegramClient(token=***)"
 
-    def _call(self, method: str, payload: dict[str, Any]) -> dict[str, Any]:
-        http = self._client or httpx.Client(timeout=TIMEOUT_SECONDS)
+    def _call(
+        self, method: str, payload: dict[str, Any], *, timeout: float = TIMEOUT_SECONDS
+    ) -> dict[str, Any]:
+        http = self._client or httpx.Client(timeout=timeout)
         try:
             response = http.post(f"{API}/bot{self._token}/{method}", json=payload)
             response.raise_for_status()
@@ -54,6 +56,16 @@ class TelegramClient:
             "sendMessage",
             {"chat_id": self._chat_id, "text": text, "disable_web_page_preview": True},
         )
+
+    def get_updates(self, offset: int | None, timeout: int) -> list[dict[str, Any]]:
+        """Messages to the bot since `offset`, waiting up to `timeout` seconds for one
+        (long polling). Passing an offset confirms, and so drops, every earlier update."""
+        payload: dict[str, Any] = {"timeout": timeout, "allowed_updates": ["message"]}
+        if offset is not None:
+            payload = {"offset": offset, **payload}
+        data = self._call("getUpdates", payload, timeout=timeout + TIMEOUT_SECONDS)
+        result = data.get("result")
+        return [u for u in result if isinstance(u, dict)] if isinstance(result, list) else []
 
     def find_chats(self) -> list[tuple[str, str]]:
         """Chats that recently messaged the bot, as (chat id, name), first seen first."""
