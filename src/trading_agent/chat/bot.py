@@ -199,10 +199,14 @@ class ChatBot:
             return HELP
         bare = lowered.rstrip(" ?!.")
         if _CHECK_IN.match(bare) and len(bare.split()) <= _CHECK_IN_MAX_WORDS:
-            return self._status_line()
+            return "\n".join([self._opener(bare), *self._status_lines()])
         if _GREETING.match(lowered):
-            return (
-                f"Hi! 👋 {self._status_line()}\nAsk me anything, or send help to see what I can do."
+            return "\n".join(
+                [
+                    "Hi! 👋",
+                    *self._status_lines(),
+                    "Ask me anything, or send help to see what I can do.",
+                ]
             )
         if _TRADE_REQUEST.match(lowered):
             return (
@@ -233,45 +237,66 @@ class ChatBot:
 
     # ---------- Free answers ----------
 
-    def _status_line(self) -> str:
+    def _status_lines(self) -> list[str]:
+        """Where things stand, as short natural sentences."""
         view = self._data.overview()
-        parts = []
+        lines = []
         market = view.get("market")
         if market is None:
-            parts.append("Market status unknown.")
+            lines.append("I can't see the market clock right now.")
         elif market.get("is_open"):
             closes = datetime.fromisoformat(market["next_close"]).astimezone(self._zone)
-            parts.append(f"Market open (closes {closes:%H:%M}).")
+            lines.append(f"The market is open until {closes:%H:%M}.")
         else:
             opens = datetime.fromisoformat(market["next_open"]).astimezone(self._zone)
-            parts.append(f"Market closed (opens {opens:%a %H:%M}).")
+            lines.append(f"The market is closed right now. It opens {opens:%a} at {opens:%H:%M}.")
         positions = [p["symbol"] for p in view.get("positions") or []]
         if not positions:
-            parts.append("No open positions.")
+            lines.append("I have no open positions, so everything is in cash.")
         else:
             noun = "position" if len(positions) == 1 else "positions"
-            parts.append(f"{len(positions)} open {noun}: {', '.join(positions)}.")
+            lines.append(f"I'm holding {len(positions)} {noun}: {', '.join(positions)}.")
         account = view.get("account")
         if account:
-            change = account.get("day_change")
-            today = f" ({_usd(change, sign=True)} today)" if change is not None else ""
-            parts.append(f"Equity {_usd(account.get('equity'))}{today}.")
+            change = _dec(account.get("day_change"))
+            if change is None:
+                today = ""
+            elif change == 0:
+                today = " (unchanged today)"
+            else:
+                today = f" ({_usd(change, sign=True)} today)"
+            lines.append(f"Account value: {_usd(account.get('equity'))}{today}.")
         try:
             journal = self._data.journal(self._today())
         except Exception:  # the journal only adds to the answer; never block it
             journal = None
         if journal and journal.get("snapshots"):
-            parts.append(
-                f"I'm watching and recording the market: {journal['snapshots']} snapshots and "
-                f"{journal.get('sources', 0)} news items today."
+            lines.append(
+                f"Today I've recorded {journal['snapshots']} market snapshots and "
+                f"{journal.get('sources', 0)} news items."
             )
         if self._pause.paused_reason(self._today()):
-            parts.append("New trades are paused for today.")
+            lines.append("New trades are paused for today.")
         if view.get("kill_switch"):
-            parts.append("The kill switch is on: no new trades.")
+            lines.append("The kill switch is on, so no new trades.")
         for error in (view.get("errors") or [])[:2]:
-            parts.append(f"(Note: {error}.)")
-        return " ".join(parts)
+            lines.append(f"(Note: {error}.)")
+        return lines
+
+    def _status_line(self) -> str:
+        return "\n".join(self._status_lines())
+
+    @staticmethod
+    def _opener(check_in: str) -> str:
+        if re.match(r"how(?: are you| are things|'s it going| is it going)", check_in):
+            return "I'm doing well, thanks for asking! 😊"
+        if re.match(r"(?:what'?s up|sup)\b", check_in):
+            return "Not much, just keeping an eye on the market. 👀"
+        if re.match(r"how(?: is|'s| was) everything", check_in):
+            return "Everything's running smoothly. 👍"
+        if re.match(r"(?:are you|you there)", check_in):
+            return "Yes, I'm here and watching. 👀"
+        return "Here's where things stand:"
 
     def _positions(self) -> str:
         rows = self._data.overview().get("positions") or []

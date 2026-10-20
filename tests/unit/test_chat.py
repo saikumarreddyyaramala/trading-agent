@@ -233,10 +233,10 @@ def test_hi_gets_a_greeting_with_the_status(tmp_path: Path) -> None:
     bot, _, ai, _ = _bot(tmp_path)
     reply = bot.reply("Hi")
     assert reply.startswith("Hi! 👋")
-    assert "Market closed (opens Mon 09:30)" in reply
+    assert "The market is closed right now. It opens Mon at 09:30." in reply
     assert reply.endswith("Ask me anything, or send help to see what I can do.")
-    assert "No open positions" in reply
-    assert "Equity $100,012.34 (+$12.40 today)" in reply
+    assert "I have no open positions, so everything is in cash." in reply
+    assert "Account value: $100,012.34 (+$12.40 today)." in reply
     assert ai.requests == []  # free: no AI
 
 
@@ -410,7 +410,7 @@ def test_other_questions_go_to_the_ai_with_the_records(tmp_path: Path) -> None:
     question = request.messages[-1].content
     assert "why didn't you trade on wednesday?" in question
     assert "2026-10-14" in question  # the day it asked about, from the records
-    assert "Market closed" in question
+    assert "The market is closed right now" in question
 
 
 def test_the_ai_is_capped_per_day(tmp_path: Path) -> None:
@@ -534,7 +534,7 @@ JOURNAL = {"snapshots": 18, "sources": 455, "notes": 1, "notebook": False}
 )
 def test_casual_check_ins_get_the_free_status(tmp_path: Path, text: str) -> None:
     bot, _, ai, _ = _bot(tmp_path)
-    assert "Market closed (opens Mon 09:30)" in bot.reply(text)
+    assert "The market is closed right now. It opens Mon at 09:30." in bot.reply(text)
     assert ai.requests == []
 
 
@@ -547,7 +547,7 @@ def test_a_real_question_still_goes_to_the_ai(tmp_path: Path) -> None:
 def test_status_says_what_the_journal_recorded_today(tmp_path: Path) -> None:
     bot, _, _, _ = _bot(tmp_path, FakeData(journal=JOURNAL))
     reply = bot.reply("are you watching the market?")
-    assert "I'm watching and recording the market: 18 snapshots and 455 news items today." in reply
+    assert "Today I've recorded 18 market snapshots and 455 news items." in reply
 
 
 def test_the_ai_knows_its_schedule_and_its_day(tmp_path: Path) -> None:
@@ -624,3 +624,56 @@ def test_journal_summary_counts_the_days_files(tmp_path: Path) -> None:
         "notes": 0,
         "notebook": False,
     }
+
+
+# ---------- Talking like a person (2026-10-19, second round of screenshots) ----------
+
+
+@pytest.mark.parametrize(
+    ("text", "opener"),
+    [
+        ("How are you ?", "I'm doing well, thanks for asking! 😊"),
+        ("How\u2019s it going", "I'm doing well, thanks for asking! 😊"),
+        ("What\u2019s up ?", "Not much, just keeping an eye on the market. 👀"),
+        ("How is everything?", "Everything's running smoothly. 👍"),
+        ("Are you watching the market right ?", "Yes, I'm here and watching. 👀"),
+        ("are you there", "Yes, I'm here and watching. 👀"),
+        ("status", "Here's where things stand:"),
+    ],
+)
+def test_check_ins_open_like_a_conversation(tmp_path: Path, text: str, opener: str) -> None:
+    bot, _, _, _ = _bot(tmp_path)
+    reply = bot.reply(text)
+    assert reply.splitlines()[0] == opener
+
+
+def test_the_status_reads_as_short_lines(tmp_path: Path) -> None:
+    bot, _, _, _ = _bot(tmp_path, FakeData(journal=JOURNAL))
+    assert bot.reply("how are you?").splitlines() == [
+        "I'm doing well, thanks for asking! 😊",
+        "The market is closed right now. It opens Mon at 09:30.",
+        "I have no open positions, so everything is in cash.",
+        "Account value: $100,012.34 (+$12.40 today).",
+        "Today I've recorded 18 market snapshots and 455 news items.",
+    ]
+
+
+def test_an_unchanged_day_says_so_in_words(tmp_path: Path) -> None:
+    flat = _overview(account={"equity": "99999.94", "day_change": "0.00"})
+    bot, _, _, _ = _bot(tmp_path, FakeData(overview=flat))
+    assert "Account value: $99,999.94 (unchanged today)." in bot.reply("status")
+
+
+def test_an_open_market_and_a_holding(tmp_path: Path) -> None:
+    view = _overview(
+        market={
+            "is_open": True,
+            "next_open": "2026-10-19T13:30:00+00:00",
+            "next_close": "2026-10-19T20:00:00+00:00",
+        },
+        positions=[AAPL_POSITION],
+    )
+    bot, _, _, _ = _bot(tmp_path, FakeData(overview=view))
+    reply = bot.reply("status")
+    assert "The market is open until 16:00." in reply
+    assert "I'm holding 1 position: AAPL." in reply
