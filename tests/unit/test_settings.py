@@ -319,3 +319,20 @@ def test_repo_config_guidebook(config_dir: Path) -> None:
     assert guidebook.enabled
     assert (guidebook.min_trades, guidebook.playbook_min_trades) == (10, 5)
     assert guidebook.write_playbooks
+
+
+def test_live_trading_can_only_use_the_strict_analyst(config_dir: Path) -> None:
+
+    (config_dir / "live.yaml").write_text(
+        (config_dir / "live.yaml").read_text(encoding="utf-8")
+        + "\nanalyst:\n  stance: gather_data\n",
+        encoding="utf-8",
+    )
+    from trading_agent.settings.loader import ConfigError
+
+    with pytest.raises(ConfigError, match="strict analyst"):
+        load_config("live", config_dir)
+
+
+def test_repo_live_config_is_strict(config_dir: Path) -> None:
+    assert load_config("live", config_dir).analyst.stance == "strict"

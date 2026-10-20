@@ -122,3 +122,32 @@ def test_during_the_session_there_is_no_pre_open_note() -> None:
 
     prompt = task_prompt(NOW, "America/New_York", trade_window_start=time(9, 45))
     assert "opens at 09:30" not in prompt
+
+
+# ---------- Paper gathers data; live stays strict (2026-10-20) ----------
+
+STRICT_LINE = '"no_trade" is a good answer whenever the evidence is weak or mixed.'
+
+
+def test_paper_takes_the_best_setup_unless_there_is_a_clear_reason(config_dir: Path) -> None:
+    config = load_config("paper", config_dir)
+    assert config.analyst.stance == "gather_data"
+    prompt = " ".join(system_prompt(config).split())
+    assert "purpose is to collect trading data" in prompt
+    assert "propose the best available long setup" in prompt
+    assert "not merely mixed or imperfect signals" in prompt
+    assert (
+        "A mixed bias lowers your confidence; it is not by itself a reason for no_trade." in prompt
+    )
+    assert STRICT_LINE not in prompt
+    assert "A mixed bias is a reason for no_trade." not in prompt
+    assert "risk checks, the trade score, and the critic still decide" in prompt
+
+
+def test_strict_is_the_default_and_keeps_the_old_wording() -> None:
+    from trading_agent.settings.models import AppConfig
+
+    prompt = " ".join(system_prompt(AppConfig()).split())
+    assert STRICT_LINE in prompt
+    assert "A mixed bias is a reason for no_trade." in prompt
+    assert "collect trading data" not in prompt

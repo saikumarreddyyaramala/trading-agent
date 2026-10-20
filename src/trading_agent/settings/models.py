@@ -145,6 +145,10 @@ class AnalystConfig(_Strict):
     max_total_tokens: int = Field(default=300_000, gt=0, le=5_000_000)
     # Chances to fix an answer that fails validation or evidence checks.
     repair_attempts: int = Field(default=1, ge=0, le=3)
+    # strict: "no_trade" whenever the evidence is weak or mixed (always, for live money).
+    # gather_data: paper only; take the best available setup unless there is a clear reason
+    # not to, so the system collects data. Risk checks, the score, and the critic still decide.
+    stance: Literal["strict", "gather_data"] = "strict"
 
 
 class ExecutionConfig(_Strict):
@@ -447,6 +451,11 @@ class AppConfig(_Strict):
             raise ValueError(
                 "live trading allows one trade and one position per day (ADR 0015); "
                 "more are for paper data gathering only"
+            )
+        if self.environment is Environment.LIVE and self.analyst.stance != "strict":
+            raise ValueError(
+                "live trading requires the strict analyst (analyst.stance: strict); "
+                "gather_data is for paper only"
             )
         return self
 

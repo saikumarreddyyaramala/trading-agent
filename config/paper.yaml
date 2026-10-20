@@ -9,3 +9,9 @@ broker:
 risk:
   max_trades_per_day: 3
   max_open_positions: 3
+
+# Paper is for collecting data: the analyst takes the best available setup unless there is
+# a clear reason not to. Risk checks, the trade score, and the critic still decide. Live
+# money always uses the strict analyst (the config refuses anything else).
+analyst:
+  stance: gather_data
