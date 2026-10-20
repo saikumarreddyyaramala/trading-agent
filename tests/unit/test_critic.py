@@ -14,6 +14,7 @@ from trading_agent.agents.critic import (
     CriticAgent,
     CriticOutput,
     EvidenceCheck,
+    critic_system_prompt,
     enforce,
     evidence_message,
 )
@@ -93,7 +94,7 @@ def test_approval_when_every_claim_is_supported() -> None:
     assert result.usage.input_tokens == 10
     assert result.created_at == NOW
     request = provider.requests[0]
-    assert request.system == CRITIC_SYSTEM_PROMPT
+    assert request.system == critic_system_prompt(AppConfig())
     assert request.tools == ()  # the critic gets no tools
     assert request.tags == {"run_id": "r1", "agent": "critic"}
 
@@ -233,3 +234,41 @@ def test_the_systems_own_notices_are_not_a_red_flag() -> None:
     assert '"notice" field' in prompt
     assert "never a red flag" in prompt
     assert "red flag and veto" in prompt  # third-party instructions still are
+
+
+# ---------- What code already controls (2026-10-19) ----------
+
+
+def test_the_critic_knows_what_the_risk_engine_controls() -> None:
+    # On 2026-10-19 the critic vetoed CLF partly because "a defined stop, target and position
+    # size are missing". The risk engine always sets those; the critic must judge the idea.
+    from trading_agent.agents.critic import critic_system_prompt
+
+    prompt = " ".join(critic_system_prompt(AppConfig()).split())
+    assert "stop-loss 5% below the entry" in prompt
+    assert "take-profit 10% above it" in prompt
+    assert "caps the position at $50" in prompt
+    assert "closes every position by 15:50 America/New_York" in prompt
+    assert "do not veto because the proposal lacks them" in prompt
+    assert "Judge only the trade idea" in prompt
+    assert "When in doubt, veto." in prompt  # still the strict reviewer
+
+
+def test_the_critic_is_told_the_configured_limits() -> None:
+    from trading_agent.agents.critic import critic_system_prompt
+
+    config = AppConfig.model_validate(
+        {"risk": {"stop_loss_pct": 3, "take_profit_pct": 6, "max_position_usd": 25}}
+    )
+    prompt = " ".join(critic_system_prompt(config).split())
+    assert "stop-loss 3% below the entry" in prompt
+    assert "take-profit 6% above it" in prompt
+    assert "caps the position at $25" in prompt
+
+
+def test_reviews_use_the_configured_prompt() -> None:
+    from trading_agent.agents.critic import critic_system_prompt
+
+    critic, provider = _critic([_answer()])
+    critic.review("r1", PROPOSAL, CALLS)
+    assert provider.requests[0].system == critic_system_prompt(AppConfig())

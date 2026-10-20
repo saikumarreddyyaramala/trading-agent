@@ -30,13 +30,15 @@ from trading_agent.mcp_server.tools import TECHNICAL_NOTICE, UNTRUSTED_NEWS_NOTI
 from trading_agent.observability.logging import get_logger
 from trading_agent.settings.models import AppConfig
 
-CRITIC_PROMPT_VERSION = "critic-2026-10-18.1"
+CRITIC_PROMPT_VERSION = "critic-2026-10-19.1"
 
 CRITIC_SYSTEM_PROMPT = """\
 You are the independent risk reviewer of an automated US stock trading system. An analyst
 has proposed one intraday long trade and cited evidence from tool calls. You see the
 proposal and the exact tool outputs the analyst saw. Your job is to find reasons NOT to
 trade. You cannot change the proposal; you can only approve or veto it.
+
+RISK_CONTROLS
 
 1. For EVERY evidence item, decide whether the cited tool output directly supports the
    claim. Numbers must match the output. A claim that cites the wrong call is unsupported,
@@ -65,6 +67,28 @@ Reply with ONLY a JSON object:
 Include one evidence_checks entry for every evidence item in the proposal.""".replace(
     '"NEWS_NOTICE"', f'"{UNTRUSTED_NEWS_NOTICE}"'
 ).replace('"TECHNICAL_NOTICE"', f'"{TECHNICAL_NOTICE}"')
+
+_RISK_CONTROLS = """\
+What code already controls: a separate, code-enforced risk engine sizes and protects every
+approved trade. It places a broker-side stop-loss {stop}% below the entry and a
+take-profit {target}% above it, caps the position at ${size}, allows at most {trades}
+trades a day, and closes every position by {close} {timezone}. A proposal never states
+these, so do not veto because the proposal lacks them. Judge only the trade idea: whether
+the evidence supports buying this stock now and holding it, at most, until that close."""
+
+
+def critic_system_prompt(config: AppConfig) -> str:
+    """The critic's instructions, with the limits the risk engine actually enforces."""
+    risk, schedule = config.risk, config.schedule
+    controls = _RISK_CONTROLS.format(
+        stop=f"{risk.stop_loss_pct:g}",
+        target=f"{risk.take_profit_pct:g}",
+        size=f"{risk.max_position_usd:g}",
+        trades=risk.max_trades_per_day,
+        close=f"{schedule.force_close:%H:%M}",
+        timezone=schedule.timezone,
+    )
+    return CRITIC_SYSTEM_PROMPT.replace("RISK_CONTROLS", controls)
 
 
 class EvidenceCheck(BaseModel):
@@ -160,6 +184,7 @@ class CriticAgent:
     ) -> None:
         self._gateway = gateway
         self._config = config.critic
+        self._system = critic_system_prompt(config)
         self._clock = clock or (lambda: datetime.now(UTC))
         self._log = logger or get_logger(__name__)
 
@@ -182,7 +207,7 @@ class CriticAgent:
             try:
                 response = self._gateway.complete(
                     LLMRequest(
-                        system=CRITIC_SYSTEM_PROMPT,
+                        system=self._system,
                         messages=tuple(messages),
                         tags={"run_id": run_id, "agent": "critic"},
                     )
