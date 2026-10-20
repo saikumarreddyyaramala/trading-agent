@@ -21,8 +21,8 @@ from trading_agent.observability.logging import get_logger
 POLL_TIMEOUT_SECONDS = 30
 RETRY_SECONDS = 10.0
 MAX_RETRY_SECONDS = 300.0
-NON_TEXT_REPLY = "I can only read text messages. Send help to see what I can do."
-SORRY_REPLY = "Sorry, something went wrong answering that."
+NON_TEXT_REPLY = "I can only read text messages for now 🙂 Send help to see what I can do."
+SORRY_REPLY = "Sorry, something went wrong answering that. Please try again in a moment."
 
 
 class UpdatesClient(Protocol):

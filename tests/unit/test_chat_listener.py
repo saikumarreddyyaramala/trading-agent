@@ -138,14 +138,19 @@ def test_non_text_messages_get_a_polite_reply() -> None:
     listener, bot, _ = _listener(telegram)
     listener.poll_once()
     assert bot.heard == []
-    assert telegram.sent == ["I can only read text messages. Send help to see what I can do."]
+    assert telegram.sent == [
+        "I can only read text messages for now 🙂 Send help to see what I can do."
+    ]
 
 
 def test_a_bot_crash_becomes_an_apology_and_the_next_message_still_works() -> None:
     telegram = FakeTelegram([_update(1, "boom"), _update(2, "hi")])
     listener, _, log = _listener(telegram, FakeBot(crash_on="boom"))
     listener.poll_once()
-    assert telegram.sent == ["Sorry, something went wrong answering that.", "echo: hi"]
+    assert telegram.sent == [
+        "Sorry, something went wrong answering that. Please try again in a moment.",
+        "echo: hi",
+    ]
     assert "chat.reply_failed" in log.names()
 
 

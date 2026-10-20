@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Callable
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any, Protocol
 from zoneinfo import ZoneInfo
@@ -21,13 +21,13 @@ from trading_agent.chat.pause import PauseStore
 from trading_agent.domain.models import ChatMessage, LLMRequest, LLMResponse
 from trading_agent.llm.errors import LLMError
 from trading_agent.observability.logging import get_logger
-from trading_agent.settings.models import ChatConfig
+from trading_agent.settings.models import AppConfig, ChatConfig
 
 MAX_REPLY_CHARS = 1500
 AI_MAX_TOKENS = 600
 
 HELP = (
-    "I can answer:\n"
+    "Happy to help! I can answer:\n"
     "• hi or status: how I'm doing right now\n"
     "• positions: what I'm holding\n"
     '• report [day]: a day\'s summary, e.g. "report last wednesday"\n'
@@ -39,15 +39,31 @@ HELP = (
 )
 
 SYSTEM_PROMPT = """\
-You are the chat voice of an automated US stock trading bot, answering its owner on
-Telegram. The bot trades a paper (simulated) account by itself, with code-enforced risk
-checks. You can only explain: you never place, change, or cancel orders, and nothing said
-in chat changes what the bot does (the owner can send "pause" to stop new trades today).
+You are an automated US stock trading bot, chatting with your owner on Telegram. Speak as
+the bot itself, in the first person ("I watched...", "I didn't trade because..."). You
+trade a paper (simulated) account by yourself, with code-enforced risk checks. In chat you
+can only explain: you never place, change, or cancel orders, and nothing said in chat
+changes what you do (the owner can send "pause" to stop new trades today).
+
+If you are answering, you are running. "About me" describes your daily schedule; "Today"
+shows what you have done so far and what comes next; "Journal" shows what you have
+watched and recorded today. Use them to answer questions about yourself.
 
 Answer from the records given with each question, and say plainly when they do not cover
-it; never invent trades, prices, or numbers. Be brief and friendly: at most 6 short lines
-of plain text, no Markdown tables. Indicators and past results describe the past; do not
-promise profits or give personal financial advice."""
+it; never invent trades, prices, or numbers. Indicators and past results describe the past;
+do not promise profits or give personal financial advice.
+
+Tone: warm, friendly, and encouraging, like a helpful assistant talking with the person it
+works for; never curt or cold. Use plain words, at most 6 short lines of plain text, no
+Markdown tables. One emoji is fine when it fits. When the news is bad (a loss, no trade, a
+problem), say it honestly and kindly, and say what happens next."""
+
+_CHECK_IN = re.compile(
+    r"^(/?status|what'?s up|sup|how(?: is|'s| was| are) (?:it going|everything|things|you"
+    r"(?: doing)?)|are you (?:there|ok|okay|alive|awake|running|working|watching|on)|you there)\b"
+)
+_CHECK_IN_MAX_WORDS = 7
+_QUOTES = str.maketrans({"\u2019": "'", "\u2018": "'", "\u201c": '"', "\u201d": '"'})
 
 _GREETING = re.compile(
     r"^(hi+|hel+o+|he+y+|hiya|yo|sup|gm|good (morning|afternoon|evening)|/start)\b"
@@ -58,6 +74,10 @@ _TRADE_REQUEST = re.compile(r"^(please\s+)?(buy|sell|short|close|cancel|exit|liq
 
 class ChatData(Protocol):
     """Read-only records, as plain JSON-style values (Decimals as strings)."""
+
+    def journal(self, day: date) -> dict[str, Any] | None:
+        """What the market journal recorded today: snapshots, sources, notes, notebook."""
+        ...
 
     def overview(self) -> dict[str, Any]: ...
 
@@ -92,6 +112,41 @@ def _pct(value: Any) -> str:
     return f"{amount:+.2f}%"
 
 
+def about_text(config: AppConfig) -> str:
+    """The bot's own day, from the live config, so chat can explain itself."""
+    schedule, journal, risk = config.schedule, config.journal, config.risk
+    slots = schedule.extra_analyses[: max(risk.max_trades_per_day - 1, 0)]
+    post_end = (
+        datetime.combine(date.today(), time(16, 0)) + timedelta(hours=journal.post_market_hours)
+    ).time()
+    notebook = (
+        datetime.combine(date.today(), post_end) + timedelta(minutes=journal.notebook_delay_minutes)
+    ).time()
+    steps = [
+        f"{journal.pre_market_start:%H:%M} I start watching and recording the market every "
+        f"{journal.snapshot_minutes} minutes (pre-market is watch only; prices on the free "
+        "data feed start at 08:00)",
+        f"{schedule.premarket_watch:%H:%M} pre-market scan",
+        f"{schedule.data_collection:%H:%M} health check",
+        f"{schedule.analysis:%H:%M} AI research and the critic's review",
+        f"{schedule.trade_window_start:%H:%M} the first possible buy, only if every risk "
+        "check passes",
+    ]
+    steps += [f"{at:%H:%M} another research and buy chance" for at in slots]
+    steps += [
+        f"{schedule.force_close:%H:%M} I sell everything",
+        f"16:00-{post_end:%H:%M} post-market, watch only",
+        f"{notebook:%H:%M} my day notebook",
+        f"{schedule.post_market:%H:%M} lessons, guidebook, tomorrow's plan, and the report",
+    ]
+    limits = (
+        f"At most {risk.max_trades_per_day} trades a day, ${risk.max_position_usd:g} per "
+        f"position, a {risk.stop_loss_pct:g}% stop-loss and a {risk.take_profit_pct:g}% "
+        "take-profit; never outside regular hours."
+    )
+    return f"My day ({schedule.timezone} time): " + "; ".join(steps) + ". " + limits
+
+
 def _weekday(day: date) -> str:
     return f"{day:%a} {day.isoformat()}"
 
@@ -106,8 +161,10 @@ class ChatBot:
         complete: Callable[[LLMRequest], LLMResponse] | None,
         clock: Callable[[], datetime] | None = None,
         timezone: str = "America/New_York",
+        about: str = "",
         logger: Any = None,
     ) -> None:
+        self._about = about
         self._data = data
         self._pause = pause
         self._config = config
@@ -125,24 +182,33 @@ class ChatBot:
 
     def reply(self, text: str) -> str:
         """Always returns a reply; never raises for bad data or a missing AI."""
-        message = " ".join(text.split())
+        message = " ".join(text.translate(_QUOTES).split())
         lowered = message.lower()
         try:
             return self._route(message, lowered)[:MAX_REPLY_CHARS]
         except Exception as exc:
             self._log.warning("chat.data_failed", error=str(exc))
-            return f"Sorry, I couldn't read my records ({type(exc).__name__}: {exc})."
+            return (
+                f"Sorry, I couldn't read my records just now ({type(exc).__name__}: {exc}). "
+                "Please try again in a minute."
+            )
 
     def _route(self, message: str, lowered: str) -> str:
         today = self._today()
         if not lowered or lowered in ("help", "/help", "?", "commands", "menu"):
             return HELP
+        bare = lowered.rstrip(" ?!.")
+        if _CHECK_IN.match(bare) and len(bare.split()) <= _CHECK_IN_MAX_WORDS:
+            return self._status_line()
         if _GREETING.match(lowered):
-            return "Hi! " + self._status_line()
+            return (
+                f"Hi! 👋 {self._status_line()}\nAsk me anything, or send help to see what I can do."
+            )
         if _TRADE_REQUEST.match(lowered):
             return (
-                "I can't trade from chat: only the daily cycle trades, after its risk checks. "
-                'You can send "pause" to stop new trades for the rest of today.'
+                "I'd love to help, but I can't place trades from chat. Only the daily cycle "
+                "trades, after all its safety checks. If you'd like me to hold off, send "
+                '"pause" and I\'ll stop new trades for the rest of today.'
             )
         if lowered in ("pause", "/pause", "pause trading", "stop trading", "stop"):
             return self._pause_today(today)
@@ -163,10 +229,6 @@ class ChatBot:
             return self._costs(days, span_label(lowered, days))
         if re.search(r"\b(plan|to-?do)\b", lowered):
             return self._plan(today)
-        if re.fullmatch(
-            r"(/?status|how are you\??|what'?s up\??|are you (running|alive|ok)\??)", lowered
-        ):
-            return self._status_line()
         return self._ask_ai(message, today)
 
     # ---------- Free answers ----------
@@ -194,6 +256,15 @@ class ChatBot:
             change = account.get("day_change")
             today = f" ({_usd(change, sign=True)} today)" if change is not None else ""
             parts.append(f"Equity {_usd(account.get('equity'))}{today}.")
+        try:
+            journal = self._data.journal(self._today())
+        except Exception:  # the journal only adds to the answer; never block it
+            journal = None
+        if journal and journal.get("snapshots"):
+            parts.append(
+                f"I'm watching and recording the market: {journal['snapshots']} snapshots and "
+                f"{journal.get('sources', 0)} news items today."
+            )
         if self._pause.paused_reason(self._today()):
             parts.append("New trades are paused for today.")
         if view.get("kill_switch"):
@@ -205,8 +276,9 @@ class ChatBot:
     def _positions(self) -> str:
         rows = self._data.overview().get("positions") or []
         if not rows:
-            return "No open positions."
-        lines = [
+            return "No open positions right now, so everything is in cash. 💵"
+        lines = ["Here's what I'm holding:"]
+        lines += [
             f"{p['symbol']} {p['quantity']} sh at {_usd(p['avg_entry_price'])}, now "
             f"{_usd(p['price'])} ({_usd(p['unrealized_pnl'], sign=True)}, "
             f"{_pct(p['unrealized_pct'])}), stop {_usd(p['stop_price'])}, "
@@ -237,8 +309,8 @@ class ChatBot:
         trades = (report or {}).get("trades") or []
         if report is None or (report.get("cycle_status") is None and not trades):
             return (
-                f"No trading record for {_weekday(day)}: the market was closed or I was not "
-                "running."
+                f"I don't have a trading record for {_weekday(day)}. The market was closed that "
+                "day, or I wasn't running."
             )
         lines = [f"{_weekday(day)}: {report.get('cycle_status') or 'no cycle result'}"]
         if trades:
@@ -249,7 +321,7 @@ class ChatBot:
             lines.append(f"{len(trades)} {noun}, {wins} won, P&L {_usd(pnl, sign=True)}")
             lines += [f"• {self._trade_line(t)}" for t in trades]
         else:
-            lines.append("No trades.")
+            lines.append("No trades that day.")
             if report.get("cycle_summary"):
                 lines.append(f"Why: {report['cycle_summary']}")
         if report.get("benchmark_pct") is not None:
@@ -263,7 +335,7 @@ class ChatBot:
     def _trades(self, days: int, label: str) -> str:
         rows = self._data.trades(days)
         if not rows:
-            return f"{label}: no trades."
+            return f"{label}: no trades yet."
         closed = [t for t in rows if t.get("closed")]
         wins = sum(1 for t in closed if (_dec(t.get("pnl_usd")) or 0) > 0)
         pnl = sum((_dec(t.get("pnl_usd")) or Decimal(0) for t in closed), Decimal(0))
@@ -301,7 +373,7 @@ class ChatBot:
     def _plan(self, today: date) -> str:
         plan = self._data.plan(today)
         if not plan or not plan.get("items"):
-            return "No plan yet: I write one after each session closes."
+            return "No plan yet. I write one every evening after the session closes."
         day = date.fromisoformat(plan["for_day"])
         items = sorted(plan["items"], key=lambda item: item.get("priority", 3))
         lines = [f"Plan for {_weekday(day)}:"]
@@ -310,23 +382,35 @@ class ChatBot:
 
     def _pause_today(self, today: date) -> str:
         if self._pause.paused_reason(today):
-            return "Already paused for today. Trading resumes by itself tomorrow."
+            return "Already paused for today 👍 I'll start trading again tomorrow."
         try:
             self._pause.pause(today, by="telegram")
         except OSError as exc:
-            return f"Sorry, I couldn't save the pause ({exc}). Nothing changed."
+            return (
+                f"Sorry, I couldn't save the pause ({exc}), so nothing changed. Please try again."
+            )
         self._log.info("chat.paused", day=today.isoformat())
         return (
-            f"Paused: no new trades for the rest of today ({_weekday(today)}). Open positions "
-            "keep their stop-loss and are still managed and closed as usual. Trading resumes "
-            "by itself tomorrow."
+            f"Done ✅ I've paused new trades for the rest of today ({_weekday(today)}). Any "
+            "open positions keep their stop-loss and are still managed and closed as usual. "
+            "I'll start trading again tomorrow."
         )
 
     # ---------- AI answers ----------
 
     def _context(self, message: str, today: date) -> str:
         parts = [f"Now: {self._clock().astimezone(self._zone):%a %Y-%m-%d %H:%M} New York"]
+        if self._about:
+            parts.append(f"About me: {self._about}")
         parts.append(f"Status: {self._status_line()}")
+        view = self._data.overview()
+        parts.append(
+            "Today: " + json.dumps({"cycle": view.get("cycle"), "next_step": view.get("next_step")})
+        )
+        try:
+            parts.append(f"Journal: {json.dumps(self._data.journal(today))}")
+        except Exception:
+            parts.append("Journal: unavailable")
         day = parse_day(message, today)
         if day is not None:
             parts.append(f"Report for {day.isoformat()}: {json.dumps(self._data.day_report(day))}")
@@ -345,8 +429,8 @@ class ChatBot:
         cap = self._config.max_ai_answers_per_day
         if self._ai_used >= cap:
             return (
-                f"I've used my {cap} AI answers today. Send help to see what I can still "
-                "answer for free."
+                f"I've used my {cap} AI answers today, sorry! I can still answer the basics "
+                "for free: send help to see them."
             )
         request = LLMRequest(
             system=SYSTEM_PROMPT,
@@ -362,6 +446,6 @@ class ChatBot:
         try:
             response = self._complete(request)
         except LLMError as exc:
-            return f"Sorry, I couldn't reach the AI ({exc}).\n\n{HELP}"
+            return f"Sorry, I couldn't reach the AI ({exc}) just now.\n\n{HELP}"
         self._ai_used += 1
         return response.text.strip() or HELP

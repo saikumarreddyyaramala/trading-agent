@@ -22,7 +22,7 @@ from trading_agent.agents.critic import CriticAgent, CriticResult
 from trading_agent.agents.playbooks import PlaybookWriter
 from trading_agent.agents.reflection import Reflector
 from trading_agent.alerts import Alerter, TelegramClient
-from trading_agent.chat.bot import ChatBot
+from trading_agent.chat.bot import ChatBot, about_text
 from trading_agent.chat.listener import ChatListener
 from trading_agent.chat.pause import PauseStore
 from trading_agent.chat.records import ChatRecords
@@ -553,7 +553,10 @@ class Container:
     def build_chat_data(self) -> ChatRecords:
         store = self.build_audit_store()
         return ChatRecords(
-            store, self.build_dashboard_data(store), self.build_report_builder(store)
+            store,
+            self.build_dashboard_data(store),
+            self.build_report_builder(store),
+            JournalStore(Path(self.config.journal.directory)),
         )
 
     def build_chat_bot(self) -> ChatBot:
@@ -568,6 +571,7 @@ class Container:
             self.config.chat,
             complete=complete,
             timezone=self.config.schedule.timezone,
+            about=about_text(self.config),
         )
 
     def build_chat_listener(self) -> ChatListener | None:
