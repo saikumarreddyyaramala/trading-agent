@@ -286,6 +286,19 @@ repeated, and open positions keep their broker-side stop-loss.
 Only one copy of `trading-agent run` can run at a time: a second one refuses to start
 (two copies would each trade, and Telegram rejects two listeners).
 
+## Running it on your Windows PC
+
+- **Start:** double-click `start-bot.cmd`. The bot runs in a minimized window titled
+  "Trading bot - keep this window open".
+- **Watchdog:** a Windows Task Scheduler task, `TradingBotWatchdog`, checks every 5 minutes
+  and at logon, and starts the bot again if it has stopped. Restarting is safe: the bot
+  resumes where it left off, and only one copy can ever run. Each restart is logged in
+  `data/watchdog.log`, and you get the "Trading cycle started" message on Telegram.
+- **Stop on purpose:** double-click `stop-bot.cmd`. The watchdog then leaves it stopped
+  until you double-click `start-bot.cmd` again.
+- **Remove the watchdog:** in PowerShell, run
+  `Unregister-ScheduledTask TradingBotWatchdog -Confirm:$false`.
+
 ## Market journal and the day notebook
 
 From the start of pre-market (04:00 New York) to the end of post-market (20:00), the bot
