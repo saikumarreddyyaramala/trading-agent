@@ -452,6 +452,8 @@ class AppConfig(_Strict):
                 "live trading allows one trade and one position per day (ADR 0015); "
                 "more are for paper data gathering only"
             )
+        if self.environment is Environment.LIVE and not self.critic.enabled:
+            raise ValueError("live trading requires the critic (critic.enabled: true)")
         if self.environment is Environment.LIVE and self.analyst.stance != "strict":
             raise ValueError(
                 "live trading requires the strict analyst (analyst.stance: strict); "

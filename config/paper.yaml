@@ -15,3 +15,9 @@ risk:
 # money always uses the strict analyst (the config refuses anything else).
 analyst:
   stance: gather_data
+
+# 2026-10-21: the critic is off on paper, so the analyst's pick goes straight to the
+# code-enforced risk checks and trade score, which still decide. Set true to turn it back
+# on. Live money always keeps the critic (the config refuses false).
+critic:
+  enabled: false

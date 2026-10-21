@@ -246,7 +246,7 @@ def test_invalid_reporting_settings_are_rejected(override: dict[str, object]) ->
 
 
 def test_repo_config_critic(config_dir: Path) -> None:
-    critic = load_config("paper", config_dir).critic
+    critic = load_config("live", config_dir).critic  # paper has it off since 2026-10-21
     assert critic.enabled is True
     assert critic.model is None
     assert critic.repair_attempts == 1
@@ -336,3 +336,20 @@ def test_live_trading_can_only_use_the_strict_analyst(config_dir: Path) -> None:
 
 def test_repo_live_config_is_strict(config_dir: Path) -> None:
     assert load_config("live", config_dir).analyst.stance == "strict"
+
+
+def test_repo_paper_runs_without_the_critic(config_dir: Path) -> None:
+    # 2026-10-21: the owner turned the critic off on paper so the analyst's pick goes
+    # straight to the risk checks; the risk engine and trade score still decide.
+    assert load_config("paper", config_dir).critic.enabled is False
+
+
+def test_live_trading_always_keeps_the_critic(config_dir: Path) -> None:
+    from trading_agent.settings.loader import ConfigError
+
+    (config_dir / "live.yaml").write_text(
+        (config_dir / "live.yaml").read_text(encoding="utf-8") + "\ncritic:\n  enabled: false\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigError, match="critic"):
+        load_config("live", config_dir)

@@ -267,7 +267,9 @@ def test_critic_uses_its_own_model_when_configured(config_dir: Path) -> None:
 
 
 def test_critic_defaults_to_the_analysts_model(config_dir: Path) -> None:
-    container = Container(config=load_config("paper", config_dir), secrets=make_secrets())
+    paper = load_config("paper", config_dir)
+    config = paper.model_copy(update={"critic": paper.critic.model_copy(update={"enabled": True})})
+    container = Container(config=config, secrets=make_secrets())
     critic = container.build_critic()
     assert critic is not None
     assert critic._gateway.models == ("gpt-6.1-sol", "gpt-6-luna")
